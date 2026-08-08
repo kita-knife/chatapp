@@ -10,6 +10,7 @@ interface Props {
   setModel: (v: string) => void;
   models: ModelInfo[];
   onNewSession: () => void;
+  checking?: boolean;
 }
 
 export function ChatInput({
@@ -22,6 +23,7 @@ export function ChatInput({
   setModel,
   models,
   onNewSession,
+  checking,
 }: Props) {
   return (
     <div className="chat-input">
@@ -61,8 +63,12 @@ export function ChatInput({
             Stop
           </button>
         ) : (
-          <button className="btn-primary" onClick={onSend} disabled={!input.trim()}>
-            Send
+          <button
+            className="btn-primary"
+            onClick={onSend}
+            disabled={!input.trim() || checking}
+          >
+            {checking ? 'Checking…' : 'Send'}
           </button>
         )}
       </div>

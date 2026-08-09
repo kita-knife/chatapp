@@ -1,0 +1,19 @@
+# Cache-busting — none of these should land inside the image.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.local
+.env.*.local
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+*.md
+.DS_Store

@@ -64,8 +64,21 @@ export interface ConnectivityResult {
   error: string | null;
 }
 
+const API_BASE: string =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') || '/api';
+
+function apiPath(path: string): string {
+  // Allow callers to keep using `/api/...` style paths; strip the leading
+  // `/api` so we don't double-prefix when API_BASE is `/api` (the default).
+  let p = path.startsWith('/') ? path : '/' + path;
+  if (p === '/api' || p.startsWith('/api/')) {
+    p = p === '/api' ? '/' : p.slice(4);
+  }
+  return `${API_BASE}${p}`;
+}
+
 async function jsonRequest<T>(input: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(input, {
+  const res = await fetch(apiPath(input), {
     ...init,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
@@ -145,7 +158,7 @@ export const api = {
     model?: string,
     mode?: string,
   ): AsyncGenerator<StreamChunk> {
-    const res = await fetch(`/api/chat/sessions/${sessionId}/messages`, {
+    const res = await fetch(apiPath(`/api/chat/sessions/${sessionId}/messages`), {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },

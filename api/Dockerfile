@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1.6
+FROM python:3.12-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONHASHSEED=random \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT="--system"
+
+# libpq-dev is needed by asyncpg at build time; libpq5 at runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+        libpq5 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv==0.8.12
+
+WORKDIR /app
+
+# --- dependency layer: cache uv sync ---
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+# --- application layer ---
+COPY app ./app
+COPY README.md ./README.md
+
+# Drop privileges (best-effort; Railway runs as non-root by default).
+RUN useradd --create-home --shell /bin/bash --uid 1000 appuser 2>/dev/null || true
+USER appuser
+
+EXPOSE 8000
+
+# Honor the platform's $PORT (Railway, Fly, etc.). Falls back to 8000.
+ENV PORT=8000
+
+CMD ["sh", "-c", "uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

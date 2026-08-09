@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+railway.toml
+*.md
+.DS_Store
+.env
+.env.local

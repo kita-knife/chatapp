@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   api,
@@ -162,12 +162,21 @@ export function useChat() {
     probeConnectivity();
   }, [auth.user, refreshHealth, refreshModels, refreshSessions, probeConnectivity]);
 
-  // Load turns whenever the URL session id changes.
+  // Tracks whether a stream is currently mutating `turns[]`. The URL-change
+  // effect below must NOT clobber that local state — otherwise on /chat
+  // (no session) the send()'s temp turn is replaced by the server's
+  // response (real uuid) and subsequent chunk updates can't find the
+  // temp id, freezing the UI at "streaming…".
+  const streamingRef = useRef(false);
+
+  // Load turns whenever the URL session id changes — but only when we're
+  // not in the middle of streaming a message.
   useEffect(() => {
     if (!auth.user || !currentSessionId) {
       setTurns([]);
       return;
     }
+    if (streamingRef.current) return;
     let cancelled = false;
     (async () => {
       try {
@@ -236,6 +245,7 @@ export function useChat() {
     setTurns((prev) => [...prev, newTurn]);
     setInput('');
     setStreaming(true);
+    streamingRef.current = true;
 
     try {
       let lastTokensIn = 0;
@@ -274,6 +284,7 @@ export function useChat() {
         prev.map((t) => (t.id === tempTurnId ? { ...t, status: 'error' } : t)),
       );
     } finally {
+      streamingRef.current = false;
       setStreaming(false);
     }
   }, [currentSessionId, input, streaming, model, mode, probeConnectivity, refreshSessions, navigate]);

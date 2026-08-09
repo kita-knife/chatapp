@@ -1,5 +1,13 @@
 import type { ModelInfo } from '../api/client';
 
+export type AgentMode = 'simple' | 'knowledge' | 'think';
+
+export const AGENT_MODES: { value: AgentMode; label: string; description: string }[] = [
+  { value: 'simple', label: 'Simple', description: 'straightforward chat' },
+  { value: 'knowledge', label: 'Knowledge', description: 'RAG-augmented answers' },
+  { value: 'think', label: 'Think', description: 'deeper reasoning' },
+];
+
 interface Props {
   input: string;
   setInput: (v: string) => void;
@@ -9,7 +17,8 @@ interface Props {
   model: string;
   setModel: (v: string) => void;
   models: ModelInfo[];
-  onNewSession: () => void;
+  mode: AgentMode;
+  setMode: (v: AgentMode) => void;
   checking?: boolean;
 }
 
@@ -22,20 +31,32 @@ export function ChatInput({
   model,
   setModel,
   models,
-  onNewSession,
+  mode,
+  setMode,
   checking,
 }: Props) {
   return (
     <div className="chat-input">
       <div className="chat-input-row">
-        <button className="btn-secondary" onClick={onNewSession} disabled={streaming}>
-          + New chat
-        </button>
+        <select
+          className="select mode-select"
+          value={mode}
+          onChange={(e) => setMode(e.target.value as AgentMode)}
+          disabled={streaming}
+          title="Agent mode"
+        >
+          {AGENT_MODES.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
         <select
           className="select"
           value={model}
           onChange={(e) => setModel(e.target.value)}
           disabled={streaming}
+          title="Model"
         >
           {models.map((m) => (
             <option key={`${m.provider}:${m.model}`} value={m.model}>

@@ -9,6 +9,7 @@ import {
 } from '@/api/client';
 import { useAuth } from '@/features/auth/useAuth';
 import { useLogout } from '@/features/auth/useAuth';
+import type { AgentMode } from '@/components/ChatInput';
 
 /**
  * Chat state hook. The URL (`/chat/:sessionId`) is the single source of truth
@@ -28,6 +29,20 @@ export function useChat() {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
   const [model, setModel] = useState('');
+  const [mode, setModeState] = useState<AgentMode>(() => {
+    // Prefer the user's stored preference; fall back to localStorage; default simple.
+    const fromLs = typeof window !== 'undefined' ? window.localStorage.getItem('chatapp.mode') : null;
+    if (fromLs === 'simple' || fromLs === 'knowledge' || fromLs === 'think') return fromLs;
+    return 'simple';
+  });
+  const setMode = useCallback((m: AgentMode) => {
+    setModeState(m);
+    try {
+      window.localStorage.setItem('chatapp.mode', m);
+    } catch {
+      /* ignore */
+    }
+  }, []);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<string>('unknown');
@@ -42,6 +57,41 @@ export function useChat() {
       setInput('');
       setModel('');
       setError(null);
+      try {
+        window.localStorage.removeItem('chatapp.mode');
+        window.localStorage.removeItem('chatapp.model');
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [auth.isReady, auth.user]);
+
+  // Sync preferences from server into local state on login. Server is the
+  // source of truth; the user picks a mode via the UI, which we also cache
+  // locally for instant restore across reloads.
+  useEffect(() => {
+    const prefs = auth.user?.preferences;
+    if (!prefs) return;
+    if (
+      (prefs.default_mode === 'simple' ||
+        prefs.default_mode === 'knowledge' ||
+        prefs.default_mode === 'think') &&
+      prefs.default_mode !== mode
+    ) {
+      setMode(prefs.default_mode);
+      try {
+        window.localStorage.setItem('chatapp.mode', prefs.default_mode);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (prefs.default_model && !model) {
+      setModel(prefs.default_model);
+      try {
+        window.localStorage.setItem('chatapp.model', prefs.default_model);
+      } catch {
+        /* ignore */
+      }
     }
   }, [auth.isReady, auth.user]);
 
@@ -190,7 +240,7 @@ export function useChat() {
     try {
       let lastTokensIn = 0;
       let lastTokensOut = 0;
-      for await (const chunk of api.streamMessage(sessionId, userContent, model || undefined)) {
+      for await (const chunk of api.streamMessage(sessionId, userContent, model || undefined, mode)) {
         if (chunk.error) setError(chunk.error);
         if (chunk.delta) {
           setTurns((prev) =>
@@ -226,7 +276,7 @@ export function useChat() {
     } finally {
       setStreaming(false);
     }
-  }, [currentSessionId, input, streaming, model, probeConnectivity, refreshSessions, navigate]);
+  }, [currentSessionId, input, streaming, model, mode, probeConnectivity, refreshSessions, navigate]);
 
   const stop = useCallback(() => {
     // Streaming cannot be aborted yet without an AbortController on the
@@ -263,6 +313,8 @@ export function useChat() {
     setInput,
     model,
     setModel,
+    mode,
+    setMode,
     streaming,
     error,
     health,

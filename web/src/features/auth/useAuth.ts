@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type User } from '@/api/client';
+import { api, type User, type UserPreferences } from '@/api/client';
 
 export type AuthState = {
   user: User | null;
@@ -40,6 +40,57 @@ export function useLogout() {
     mutationFn: () => api.logout(),
     onSuccess: () => {
       qc.clear();
+    },
+  });
+}
+
+export function useMyPreferences() {
+  return useQuery({
+    queryKey: ['auth', 'me', 'preferences'],
+    queryFn: () => api.getMyPreferences(),
+    staleTime: 60_000,
+  });
+}
+
+export function useUpdateMyPreferences() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      preferences,
+      replaceAll = false,
+    }: {
+      preferences: Partial<UserPreferences>;
+      replaceAll?: boolean;
+    }) => api.updateMyPreferences(preferences, replaceAll),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['auth', 'me', 'preferences'] });
+      qc.invalidateQueries({ queryKey: ['auth'] });
+    },
+  });
+}
+
+export function useUserPreferences(userId: string | null) {
+  return useQuery({
+    queryKey: ['admin', 'users', userId, 'preferences'],
+    queryFn: () => api.getUserPreferences(userId!),
+    enabled: !!userId,
+  });
+}
+
+export function useUpdateUserPreferences() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      userId,
+      preferences,
+      replaceAll = false,
+    }: {
+      userId: string;
+      preferences: Partial<UserPreferences>;
+      replaceAll?: boolean;
+    }) => api.updateUserPreferences(userId, preferences, replaceAll),
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries({ queryKey: ['admin', 'users', vars.userId, 'preferences'] });
     },
   });
 }

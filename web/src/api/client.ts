@@ -1,9 +1,20 @@
+export interface UserPreferences {
+  default_mode: 'simple' | 'knowledge' | 'think';
+  default_model: string | null;
+  system_prompt_overrides: {
+    think: string | null;
+    knowledge: string | null;
+  };
+  ui_language: 'zh' | 'en';
+}
+
 export interface User {
   id: string;
   username: string;
   role: 'root' | 'admin' | 'user';
   created_at?: string;
   last_login_at?: string | null;
+  preferences?: UserPreferences;
 }
 
 export interface AuthStatus {
@@ -92,6 +103,25 @@ export const api = {
       body: JSON.stringify({ new_password }),
     }),
 
+  // ----- preferences -----
+  getMyPreferences: () => jsonRequest<UserPreferences>('/api/auth/me/preferences'),
+  updateMyPreferences: (preferences: Partial<UserPreferences>, replaceAll = false) =>
+    jsonRequest<UserPreferences>('/api/auth/me/preferences', {
+      method: 'PATCH',
+      body: JSON.stringify({ preferences, replace_all: replaceAll }),
+    }),
+  getUserPreferences: (id: string) =>
+    jsonRequest<UserPreferences>(`/api/auth/users/${id}/preferences`),
+  updateUserPreferences: (
+    id: string,
+    preferences: Partial<UserPreferences>,
+    replaceAll = false,
+  ) =>
+    jsonRequest<UserPreferences>(`/api/auth/users/${id}/preferences`, {
+      method: 'PATCH',
+      body: JSON.stringify({ preferences, replace_all: replaceAll }),
+    }),
+
   // ----- chat -----
   health: () => jsonRequest<{ status: string }>('/api/health'),
   listModels: () => jsonRequest<ModelInfo[]>('/api/chat/models'),
@@ -113,12 +143,13 @@ export const api = {
     sessionId: string,
     content: string,
     model?: string,
+    mode?: string,
   ): AsyncGenerator<StreamChunk> {
     const res = await fetch(`/api/chat/sessions/${sessionId}/messages`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, model }),
+      body: JSON.stringify({ content, model, mode }),
     });
     if (!res.ok || !res.body) {
       throw new Error(`Stream failed: ${res.status} ${res.statusText}`);

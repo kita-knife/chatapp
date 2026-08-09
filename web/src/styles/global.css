@@ -583,6 +583,12 @@ select {
   outline: none;
 }
 
+.mode-select {
+  font-weight: 600;
+  border-color: var(--accent);
+  background: var(--panel-3);
+}
+
 /* ----- Placeholder pages ----- */
 
 .placeholder-page {
@@ -594,6 +600,52 @@ select {
   color: var(--text);
   font-weight: 600;
   margin: 0 0 8px;
+}
+
+/* ----- Settings page ----- */
+
+.settings-page {
+  padding: 24px;
+  overflow-y: auto;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.settings-page .page-header h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.settings-page .page-header .muted {
+  margin: 4px 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-page .small {
+  font-size: 11px;
+}
+
+.btn-active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.btn-active:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.ok-banner {
+  margin: 0 0 12px;
+  background: rgba(74, 222, 128, 0.1);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  color: #86efac;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
 }
 
 /* ----- Admin page ----- */

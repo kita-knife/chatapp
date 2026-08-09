@@ -35,7 +35,8 @@ export function ChatPage() {
         model={chat.model}
         setModel={chat.setModel}
         models={chat.models}
-        onNewSession={chat.newSession}
+        mode={chat.mode}
+        setMode={chat.setMode}
         checking={chat.checkingConn}
       />
     </div>

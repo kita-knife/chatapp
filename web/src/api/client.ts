@@ -1,3 +1,5 @@
+import { notifyAuthError } from '@/authEvents';
+
 export interface UserPreferences {
   default_mode: 'simple' | 'knowledge' | 'think';
   default_model: string | null;
@@ -78,16 +80,41 @@ function apiPath(path: string): string {
 }
 
 async function jsonRequest<T>(input: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(apiPath(input), {
+  const path = apiPath(input);
+  const res = await fetch(path, {
     ...init,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    const err = new ApiError(
+      `${res.status} ${res.statusText}: ${detail}`,
+      res.status,
+      path,
+    );
+    // Surface 401s to the global auth guard even when the caller didn't
+    // go through TanStack Query (e.g. plain fetch from a useCallback).
+    notifyAuthError(err);
+    throw err;
   }
   return res.json() as Promise<T>;
+}
+
+/**
+ * Tagged error thrown by every API call on a non-2xx response. Carries
+ * the HTTP status and the request path so the global auth guard in
+ * `authGuard.ts` can decide whether to log the user out and redirect.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly path: string,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
 }
 
 export const api = {
@@ -158,14 +185,21 @@ export const api = {
     model?: string,
     mode?: string,
   ): AsyncGenerator<StreamChunk> {
-    const res = await fetch(apiPath(`/api/chat/sessions/${sessionId}/messages`), {
+    const path = apiPath(`/api/chat/sessions/${sessionId}/messages`);
+    const res = await fetch(path, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content, model, mode }),
     });
     if (!res.ok || !res.body) {
-      throw new Error(`Stream failed: ${res.status} ${res.statusText}`);
+      const err = new ApiError(
+        `Stream failed: ${res.status} ${res.statusText}`,
+        res.status,
+        path,
+      );
+      notifyAuthError(err);
+      throw err;
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();

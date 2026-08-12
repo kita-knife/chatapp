@@ -109,9 +109,11 @@ user_preferences (PK user_id FK users(id) ON DELETE CASCADE)
   updated_at
 ```
 
-Tables are auto-created on first startup via `Base.metadata.create_all`
-(`api/app/core/db.py:init_models`). For real production data, migrate to
-Alembic before shipping breaking schema changes.
+Schema is managed by Alembic under `api/migrations/`. All tables (plus
+`alembic_version`) live in the **`ai` PostgreSQL schema**, not `public`.
+Run `alembic upgrade head` from `api/` before the first start, and again
+on every deploy (the Dockerfile and Railway `releaseCommand` both do this
+automatically).
 
 ## Roles & permissions
 
@@ -194,46 +196,178 @@ data: {"delta": "你好", "finish_reason": null, "error": null, "tokens_in": 184
 data: {"delta": "", "finish_reason": "stop", "error": null, "tokens_in": 184, "tokens_out": 1612}
 ```
 
-## Local quickstart
+## Bootstrap from scratch
 
-### Prerequisites
+This walks through every step needed to take a clean machine to a logged-in
+chat session — Postgres, alembic migrations, root user, backend, and
+frontend.
 
-- Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/)
-- `pnpm` + Node 22+
-- PostgreSQL 16+ reachable
+### 0. Prerequisites
 
-### Backend
+| Tool | Min version | Why |
+|---|---|---|
+| PostgreSQL | 16+ | backend storage (we use `ai` schema, not `public`) |
+| Python | 3.12+ | backend runtime |
+| [`uv`](https://docs.astral.sh/uv/) | latest | Python package manager (reads `pyproject.toml` + `uv.lock`) |
+| Node.js | 22+ | frontend toolchain |
+| pnpm | 9+ | JS package manager |
+
+> Make sure `psql` is on `$PATH` — you'll use it once to create the
+> database.
+
+### 1. Create the database
+
+Pick a name (we use `chatapp` throughout the docs) and a superuser / role
+that can `CREATE` / DDL.
+
+```bash
+# Local Postgres (defaults match .env.example):
+PGPASSWORD=postgreswsl psql -h localhost -p 5433 -U postgres \
+  -c "CREATE DATABASE chatapp;"
+
+# Or with DATABASE_URL injection:
+psql "postgresql://user:pass@host:5432/postgres" -c "CREATE DATABASE chatapp;"
+```
+
+You only do this **once per database**. Tables, indexes, and the `ai`
+schema are created by the migration in step 3.
+
+### 2. Configure the backend
 
 ```bash
 cd api
 cp .env.example .env
-# Edit .env: set LLM_API_KEY
-
-uv sync
-
-# Create the first root user (one-time)
-uv run python -m app.cli create-root --username root --password '<password>'
-
-# Run dev server
-uv run uvicorn app.main:app --reload --port 8000
 ```
 
-Tables are auto-created on first startup. Verify:
+Edit `.env`. The three things that must be set before anything works:
 
 ```bash
-curl http://localhost:8000/api/health   # {"status":"ok"}
+# Required — primary LLM endpoint
+LLM_API_BASE=https://api.minimax.chat/v1
+LLM_API_KEY=sk-...
+
+# Required — CORS allow-list. Include the URL you'll open the web UI from.
+# For local dev:
+WEB_BASE_URL=http://localhost:5173
+
+# Database is auto-resolved from POSTGRES_* defaults in .env.example.
+# Override here only if your Postgres is elsewhere:
+# DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/chatapp
 ```
 
-### Frontend
+Then install Python dependencies (creates `.venv/`):
+
+```bash
+uv sync
+```
+
+### 3. Apply database migrations
+
+This creates the `ai` schema + all 5 tables + the `ai.alembic_version`
+table. `env.py` pre-creates the schema for you, so this works on a
+brand-new empty database with no manual `CREATE SCHEMA` step.
+
+```bash
+uv run alembic upgrade head
+# INFO  [alembic.runtime.migration] Running upgrade  -> 0001_initial_schema, initial schema
+```
+
+Verify in psql:
+
+```bash
+PGPASSWORD=postgreswsl psql -h localhost -p 5433 -U postgres -d chatapp \
+  -c "\dt ai.*"
+#  alembic_version  | auth_sessions  | chat_messages
+#  chat_sessions    | user_preferences | users
+```
+
+### 4. Create the first root user
+
+The web app has **no self-signup flow** — root must exist before anyone
+can log in. Skip this and login fails with "invalid credentials" no
+matter what you type.
+
+```bash
+uv run python -m app.cli create-root \
+  --username root \
+  --password '<choose-a-real-one>'
+# ✓ root user 'root' created (1/4)
+```
+
+The `(1/4)` is current/total — `MAX_ROOT_USERS` (default `4`) caps how many
+root accounts can exist.
+
+### 5. Start the backend
+
+```bash
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# INFO:     Application startup complete.
+# INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+Health check (open a second terminal):
+
+```bash
+curl http://localhost:8000/api/health
+# {"status":"ok"}
+```
+
+### 6. Start the frontend
+
+```bash
+cd ../web
+pnpm install     # first time only — reads pnpm-lock.yaml
+pnpm dev         # http://localhost:5173
+```
+
+The Vite dev server proxies `/api/*` to `http://localhost:8000`, so no
+extra configuration is needed for local dev.
+
+### 7. Log in
+
+Open http://localhost:5173 and sign in with the root credentials from step 4.
+You should land on the chat page with a health pill showing `LLM ✓` (the
+frontend pings `/api/chat/connectivity` against your default model).
+
+### 8. Add more users
+
+Once logged in as root, **Admin → Users** lets you create additional
+`admin` / `user` accounts through the UI (max `MAX_ROOT_USERS` root
+accounts via `create-root` CLI on the server).
+
+---
+
+### Recap: the minimal first-time sequence
+
+```bash
+# 1. Create DB (once per machine)
+PGPASSWORD=postgreswsl psql -h localhost -p 5433 -U postgres \
+  -c "CREATE DATABASE chatapp;"
+
+# 2. Backend
+cd api
+cp .env.example .env            # then edit LLM_API_KEY / WEB_BASE_URL
+uv sync
+uv run alembic upgrade head    # creates ai schema + 5 tables
+uv run python -m app.cli create-root --username root --password 'YOUR_PW'
+uv run uvicorn app.main:app --reload --port 8000
+
+# 3. Frontend (separate terminal)
+cd ../web
+pnpm install
+pnpm dev                        # http://localhost:5173
+```
+
+### Production build (web)
 
 ```bash
 cd web
-pnpm install
-pnpm dev
+VITE_API_BASE_URL=https://api.your-domain.example.com pnpm build
+# dist/  ← serve with nginx / Caddy / Cloudflare Pages / `serve -s dist -l 3000`
 ```
 
-Open http://localhost:5173 and sign in as the root user you just created.
+`VITE_API_BASE_URL` is baked into the JS bundle at build time — rebuild
+whenever the API URL changes.
 
 ## Prompt authoring
 
@@ -261,23 +395,37 @@ access (useful while iterating).
 
 ## Config reference
 
+All variables live in `api/.env` (or shell env, or `api/app/core/config.py`
+defaults — in that priority). The full list as defined by
+`app.core.config.Settings`:
+
 | Variable | Default | Description |
 |---|---|---|
-| `APP_ENV` | `development` | Environment name |
-| `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | Backend bind |
-| `WEB_BASE_URL` | `http://localhost:5173` | CORS allow-list (frontend origin) |
+| `APP_ENV` | `development` | Environment name (logged at startup) |
+| `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | Backend bind. **Not read by code** — actual port comes from the uvicorn CLI / Dockerfile. Kept for documentation. |
+| `WEB_BASE_URL` | `http://localhost:5173` | CORS allow-list (frontend origin). Must match the URL the browser opens. |
 | `DATABASE_URL` | _(unset)_ | **Override**. Railway / PaaS inject this. Auto-normalized to `postgresql+asyncpg://…` |
-| `POSTGRES_*` | localhost / 5433 / chatapp / postgres / postgreswsl | Fallback when `DATABASE_URL` is unset |
-| `LLM_API_BASE` | `https://api.minimax.chat/v1` | Primary endpoint |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | `localhost` / `5433` / `chatapp` / `postgres` / `postgreswsl` | Fallback when `DATABASE_URL` is unset |
+| `LLM_API_BASE` | `https://api.minimax.chat/v1` | Primary endpoint (OpenAI-compatible) |
 | `LLM_API_KEY` | _(empty)_ | Required for streaming to work |
-| `LLM_MODEL` | `MiniMax-M3` | Default model |
-| `OPENAI_*` / `ANTHROPIC_*` / `OLLAMA_*` | _(empty)_ | Optional alt providers |
+| `LLM_MODEL` | `MiniMax-M3` | Default model id |
+| `OPENAI_API_KEY` | _(empty)_ | Optional OpenAI provider key |
+| `OPENAI_BASE_URL` | _(empty)_ | Optional OpenAI base URL (defaults to `https://api.openai.com/v1` if key is set) |
+| `OPENAI_DEFAULT_MODEL` | `gpt-4o-mini` | Shown in the UI picker when OpenAI provider is available |
+| `ANTHROPIC_API_KEY` | _(empty)_ | Optional Anthropic provider key |
+| `ANTHROPIC_DEFAULT_MODEL` | `claude-3-5-sonnet-latest` | Shown in the UI picker when Anthropic provider is available |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint |
+| `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Shown in the UI picker when Ollama provider is available |
 | `MAX_ROOT_USERS` | `4` | Cap on `root` accounts (CLI + API both enforce) |
-| `SESSION_TTL_SECONDS` | `604800` | Cookie lifetime |
-| `SESSION_COOKIE_SECURE` | `false` | Set `true` in production (HTTPS) |
-| `SESSION_SECRET` | _(unset)_ | Reserved for signed tokens |
+| `ROOT_USERNAME_MIN_LEN` | `3` | Min length for username in `create-root` and `/api/auth/users` |
+| `ROOT_PASSWORD_MIN_LEN` | `8` | Min length for password in `create-root` and `/api/auth/users` |
+| `SESSION_TTL_SECONDS` | `604800` | Cookie lifetime (7 days) |
+| `SESSION_COOKIE_NAME` | `chatapp_session` | Cookie key name (rename to invalidate all sessions) |
+| `SESSION_COOKIE_SECURE` | `false` | Set `true` in production (HTTPS) so the browser sends the cookie over secure channels only |
 | `PROMPTS_FILE` | `app/core/prompts.yml` | Override prompt source |
-| `PROMPTS_RELOAD` | `false` | Hot-reload prompts |
+| `PROMPTS_RELOAD` | `false` | Hot-reload prompts on every access (useful while iterating) |
+
+The complete annotated template is at [`api/.env.example`](api/.env.example).
 
 ## Deployment (Railway)
 
@@ -356,11 +504,32 @@ public internet.
 
 | Task | Command |
 |---|---|
-| Reset DB (drop everything) | `PGPASSWORD=… psql -h … -c "DROP DATABASE chatapp; CREATE DATABASE chatapp;"` then restart `api` |
+| Reset DB (drop everything) | `PGPASSWORD=… psql -h … -c "DROP DATABASE chatapp; CREATE DATABASE chatapp;"` then `uv run alembic upgrade head` and `create-root` |
 | Add another root user (up to `MAX_ROOT_USERS`) | shell into `api` service, run `uv run python -m app.cli create-root --username …` |
 | Promote user → admin | root user → `/admin/users` → re-create with `role: admin` (no in-place promote yet) |
 | Edit a prompt live | edit `api/app/core/prompts.yml`; with `PROMPTS_RELOAD=true` no restart needed, otherwise redeploy `api` |
 | Stream JSON inspection | `curl -N -b cookies.txt http://localhost:8000/api/chat/sessions/{id}/messages -d '{"content":"hi"}' -H 'Content-Type: application/json'` |
+
+## Troubleshooting
+
+**"I just deployed and login fails with invalid credentials."**
+
+You almost certainly skipped step 2 above — the web app does not have a
+self-signup flow. Run `create-root` once on the server (or in your local
+terminal) and try again. Then use **Admin → Users** to create additional
+non-root accounts.
+
+**"First login click doesn't navigate, only the second one does."**
+
+Fixed in the latest code (see `useAuth.ts → useLogin.onSuccess`). Make sure
+your web bundle includes the fix (rebuild the web service / repull the
+image). If the symptom reappears, check that no stale build is being served.
+
+**"I get `alembic_version` does not exist" or other migration errors.**
+
+The DB was created by the previous auto-create-all path. Run `uv run alembic
+stamp head` to mark it as up-to-date without re-running DDL, then continue
+normal `alembic upgrade head` from then on.
 
 ## Iteration roadmap
 

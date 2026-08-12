@@ -61,6 +61,7 @@ export function AdminUsersPage() {
             placeholder="username"
             value={newUser.username}
             onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
+            autoComplete="off"
             minLength={3}
             maxLength={64}
             required
@@ -70,6 +71,7 @@ export function AdminUsersPage() {
             type="password"
             value={newUser.password}
             onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+            autoComplete="new-password"
             minLength={8}
             required
           />
@@ -116,6 +118,7 @@ export function AdminUsersPage() {
                           placeholder="new password"
                           value={editing.password}
                           onChange={(e) => setEditing({ ...editing, password: e.target.value })}
+                          autoComplete="new-password"
                           minLength={8}
                         />
                         <button

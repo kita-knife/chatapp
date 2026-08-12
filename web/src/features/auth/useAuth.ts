@@ -28,7 +28,21 @@ export function useLogin() {
   return useMutation({
     mutationFn: ({ username, password }: { username: string; password: string }) =>
       api.login(username, password),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      // Login response is the same shape as `authStatus`; writing it
+      // directly into the cache makes `useAuth()` see the authenticated
+      // user synchronously on the next render. Without this, the first
+      // click navigates to /chat but ProtectedRoute still reads the
+      // pre-login cache (user=null) and bounces back to /login, forcing
+      // a second click and creating a duplicate auth_session row.
+      //
+      // Note: the login response doesn't include `preferences` (only
+      // authStatus does). Components that need preferences fetch them
+      // via `useMyPreferences()` separately; we don't backfill here.
+      qc.setQueryData(['auth', 'status'], data);
+      // Trigger a background refetch so the full user (with preferences)
+      // gets reconciled lazily once any observer (e.g. ProtectedRoute)
+      // mounts and observes the query.
       qc.invalidateQueries({ queryKey: ['auth'] });
     },
   });

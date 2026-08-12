@@ -1,0 +1,33 @@
+modes:
+  think: |
+    请先分步骤分析问题，再给出最终结论。
+    思考过程不需要展示给用户，直接在内部推理后输出最终答案。
+  knowledge:
+    prefix: |
+      以下是检索到的相关上下文（若无内容请忽略此段）：
+    suffix: |
+      请基于以上上下文与你的知识回答用户问题。
+
+titles:
+  generate: |
+    <task>Generate a concise session title for the user's first message.</task>
+
+    <requirements>
+    - Length: 6-16 Chinese characters, or 3-8 English words.
+    - Language: match the user's dominant language.
+    - Topic focus: capture the question / subject, not literal text.
+    </requirements>
+
+    <output_format>
+    Wrap your final answer in <title> tags. Nothing else.
+    Example: <title>Python 装饰器用法</title>
+    </output_format>
+
+    <user_message>{user_content}</user_message>
+
+errors:
+  openai_unconfigured: "API key not configured for {provider}"
+  openai_unreachable: "{provider} unreachable: {error}"
+  ollama_unreachable: "ollama unreachable: {error}"
+  anthropic_unconfigured: "ANTHROPIC_API_KEY not configured"
+  streaming_failed: "agno stream failed: {error}"

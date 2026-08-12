@@ -1,4 +1,6 @@
 import type { ChatTurn } from '@/api/client';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Props {
   turn: ChatTurn;
@@ -22,7 +24,22 @@ export function ChatTurnView({ turn }: Props) {
           {turn.status === 'interrupted' && <span className="turn-status">interrupted</span>}
           {meta.length > 0 && <span className="turn-tokens">{meta.join(' · ')}</span>}
         </div>
-        <div className="turn-content">{turn.assistant_content || '…'}</div>
+        <div className="turn-content">
+          {turn.assistant_content ? (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                a: ({ ...props }) => (
+                  <a {...props} target="_blank" rel="noopener noreferrer" />
+                ),
+              }}
+            >
+              {turn.assistant_content}
+            </ReactMarkdown>
+          ) : (
+            '…'
+          )}
+        </div>
       </div>
     </div>
   );

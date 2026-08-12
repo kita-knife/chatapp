@@ -191,15 +191,13 @@ export function useChat() {
     };
   }, [auth.user, currentSessionId]);
 
-  const newSession = useCallback(async () => {
-    try {
-      const created = await api.createSession(undefined, model || undefined);
-      await refreshSessions();
-      navigate(`/chat/${created.id}`);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }, [model, refreshSessions, navigate]);
+  const newSession = useCallback(() => {
+    // Navigate to the empty chat route without creating a session row.
+    // The session is created lazily by send() when the user actually sends
+    // the first message — this avoids littering the sidebar with empty
+    // sessions when "+ New chat" is clicked multiple times in a row.
+    navigate('/chat');
+  }, [navigate]);
 
   const selectSession = useCallback(
     (id: string) => {
@@ -286,6 +284,11 @@ export function useChat() {
     } finally {
       streamingRef.current = false;
       setStreaming(false);
+      // The immediate (verbatim or truncated) title is already in DB after
+      // step 1 of the request, and the existing `listSessions()` call above
+      // pulls it into the sidebar right when the stream finishes. The
+      // background LLM-refined title (only for first messages ≥ 30 chars)
+      // will appear on the next manual refresh / session switch / new chat.
     }
   }, [currentSessionId, input, streaming, model, mode, probeConnectivity, refreshSessions, navigate]);
 

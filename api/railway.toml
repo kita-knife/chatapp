@@ -3,6 +3,9 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
+# Run schema migrations before swapping in the new release. If this fails the
+# release is rejected and the previous version keeps serving traffic.
+releaseCommand = "uv run alembic upgrade head"
 startCommand = "uv run uvicorn app.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30

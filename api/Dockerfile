@@ -38,4 +38,7 @@ EXPOSE 8000
 # Honor the platform's $PORT (Railway, Fly, etc.). Falls back to 8000.
 ENV PORT=8000
 
-CMD ["sh", "-c", "uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+# Apply schema migrations before starting the server. On Railway we also
+# run this in the `release` phase via railway.toml, but doing it here means
+# plain `docker run` works too.
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

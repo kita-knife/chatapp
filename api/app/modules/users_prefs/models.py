@@ -16,7 +16,7 @@ from app.core.db import Base
 # additive-only.
 DEFAULT_PREFERENCES: dict = {
     "default_mode": "simple",        # 'simple' | 'knowledge' | 'think'
-    "default_model": None,           # None → use settings.llm_model
+    "default_model": None,           # None → use settings.openlike_model
     "system_prompt_overrides": {
         "think": None,
         "knowledge": None,

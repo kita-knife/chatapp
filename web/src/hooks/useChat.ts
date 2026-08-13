@@ -1,5 +1,16 @@
+/**
+ * Chat state hook. The URL (`/chat/:sessionId`) is the single source of truth
+ * for which session is active — `currentSessionId` is derived from
+ * `useParams()`. All actions either create a new session (and navigate) or
+ * navigate to an existing one.
+ *
+ * Shared state (read by both AppShell and ChatPage) lives in TanStack
+ * Query's singleton cache so the two useChat instances see the same data.
+ * Per-page state (input, turns, currentSessionId) stays local.
+ */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
   type ChatSession,
@@ -11,156 +22,165 @@ import { useAuth } from '@/features/auth/useAuth';
 import { useLogout } from '@/features/auth/useAuth';
 import type { AgentMode } from '@/components/ChatInput';
 
-/**
- * Chat state hook. The URL (`/chat/:sessionId`) is the single source of truth
- * for which session is active — `currentSessionId` is derived from
- * `useParams()`. All actions either create a new session (and navigate) or
- * navigate to an existing one.
- */
 export function useChat() {
   const navigate = useNavigate();
   const auth = useAuth();
   const logout = useLogout();
+  const qc = useQueryClient();
 
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
   const currentSessionId: string | null = routeSessionId ?? null;
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [models, setModels] = useState<ModelInfo[]>([]);
+
+  // —— Shared reads via TanStack Query (singleton cache) —————————————————
+
+  // Sessions list — AppShell's sidebar reads this, ChatPage mutates it.
+  const sessionsQuery = useQuery({
+    queryKey: ['chat', 'sessions'],
+    queryFn: () => api.listSessions(),
+    enabled: !!auth.user,
+    staleTime: 0,
+  });
+  const sessions = sessionsQuery.data ?? [];
+
+  // API health — AppShell's pill.
+  const healthQuery = useQuery<{ status: string }>({
+    queryKey: ['api', 'health'],
+    queryFn: () => api.health(),
+    enabled: !!auth.user,
+    staleTime: 30_000,
+  });
+  const health = healthQuery.data?.status ?? (healthQuery.isError ? 'down' : 'unknown');
+
+  // Models list — AppShell's picker, ChatInput's picker, Settings' picker.
+  const modelsQuery = useQuery<ModelInfo[]>({
+    queryKey: ['chat', 'models'],
+    queryFn: () => api.listModels(),
+    enabled: !!auth.user,
+    staleTime: 5 * 60_000,
+  });
+  const models = modelsQuery.data ?? [];
+
+  // Connectivity probe — per-model. `defaultModel` (server-backed) is
+  // the sidebar's selected default; `model` (declared below) is the
+  // current chat selection. The probe is keyed on the default — when the
+  // user changes the sidebar, the connectivity check refetches against
+  // the new default.
+  const defaultModel = auth.user?.preferences?.default_model ?? '';
+  const mode: AgentMode =
+    (auth.user?.preferences?.default_mode as AgentMode | undefined) ?? 'simple';
+  const connectivityQuery = useQuery<ConnectivityResult | null>({
+    queryKey: ['chat', 'connectivity', defaultModel || ''],
+    queryFn: () => api.connectivity(defaultModel || undefined),
+    enabled: !!auth.user,
+    staleTime: 30_000,
+    retry: false,
+  });
+  const connectivity = connectivityQuery.data ?? null;
+  const refetchConnectivity = connectivityQuery.refetch;
+  const checkingConn = connectivityQuery.isFetching;
+
+  // `error` and `streaming` are UI state that needs to be visible across
+  // every useChat instance (e.g. AppShell's error banner needs to see
+  // errors raised inside ChatPage's send()). Storing them in the
+  // TanStack Query singleton cache gives us that for free.
+  const errorQuery = useQuery<{ msg: string | null; ts: number }>({
+    queryKey: ['ui', 'error'],
+    queryFn: () => ({ msg: null, ts: 0 }),
+    initialData: { msg: null, ts: 0 },
+    staleTime: Infinity,
+  });
+  const error = errorQuery.data?.msg ?? null;
+  const setError = useCallback(
+    (msg: string | null) => {
+      qc.setQueryData(['ui', 'error'], { msg, ts: Date.now() });
+    },
+    [qc],
+  );
+  const streamingQuery = useQuery<boolean>({
+    queryKey: ['ui', 'streaming'],
+    queryFn: () => false,
+    initialData: false,
+    staleTime: Infinity,
+  });
+  const streaming = streamingQuery.data ?? false;
+  const setStreaming = useCallback(
+    (b: boolean) => {
+      qc.setQueryData(['ui', 'streaming'], b);
+    },
+    [qc],
+  );
+
+  // —— Shared writes (mutations through server) ——————————————————————
+
+  // `defaultModel` (the sidebar's selected default — already declared
+  // above from `auth.user.preferences.default_model`) is written here via
+  // `setDefaultModel`. The sidebar's picker and Settings' "Default model"
+  // picker both call this; the server PATCH invalidates the auth query
+  // and every useAuth consumer re-renders with the new value.
+  //
+  // `model` (declared below) is the *current selection* — what `send()`
+  // actually uses for the next message. It lives in local state and is
+  // initialized from `defaultModel` via the effect below. Picking in
+  // ChatInput only affects `model`, not `defaultModel`. Refreshing the
+  // page resets the selection back to `defaultModel`.
+  const setDefaultModel = useCallback((m: string) => {
+    void api.updateMyPreferences({ default_model: m || null }).catch(() => {
+      // Auth failures (401) are caught by the global authGuard; other
+      // failures don't have a good surface here.
+    });
+  }, []);
+
+  // `mode` is a single source (server default). Both ChatInput and the
+  // Settings "Default mode" picker write to `default_mode`.
+  const setMode = useCallback((m: AgentMode) => {
+    void api.updateMyPreferences({ default_mode: m }).catch(() => {});
+  }, []);
+
+  // —— Per-page state (only ChatPage / ChatInput read these) —————————
+
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
   const [model, setModel] = useState('');
-  const [mode, setModeState] = useState<AgentMode>(() => {
-    // Prefer the user's stored preference; fall back to localStorage; default simple.
-    const fromLs = typeof window !== 'undefined' ? window.localStorage.getItem('chatapp.mode') : null;
-    if (fromLs === 'simple' || fromLs === 'knowledge' || fromLs === 'think') return fromLs;
-    return 'simple';
-  });
-  const setMode = useCallback((m: AgentMode) => {
-    setModeState(m);
-    try {
-      window.localStorage.setItem('chatapp.mode', m);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-  const [streaming, setStreaming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [health, setHealth] = useState<string>('unknown');
-  const [connectivity, setConnectivity] = useState<ConnectivityResult | null>(null);
-  const [checkingConn, setCheckingConn] = useState(false);
 
   // Reset transient state on logout.
   useEffect(() => {
     if (auth.isReady && !auth.user) {
-      setSessions([]);
+      qc.removeQueries({
+        queryKey: [
+          ['chat', 'sessions'],
+          ['api', 'health'],
+          ['chat', 'models'],
+          ['chat', 'connectivity'],
+          ['ui', 'error'],
+          ['ui', 'streaming'],
+        ],
+      });
       setTurns([]);
       setInput('');
-      setModel('');
       setError(null);
-      try {
-        window.localStorage.removeItem('chatapp.mode');
-        window.localStorage.removeItem('chatapp.model');
-      } catch {
-        /* ignore */
-      }
     }
-  }, [auth.isReady, auth.user]);
+  }, [auth.isReady, auth.user, qc]);
 
-  // Sync preferences from server into local state on login. Server is the
-  // source of truth; the user picks a mode via the UI, which we also cache
-  // locally for instant restore across reloads.
+  // Initialize `model` from `defaultModel` once the auth query has populated
+  // the user's server-side preferences. We only set `model` if it's still
+  // empty so a manual pick in ChatInput is preserved across re-renders.
   useEffect(() => {
-    const prefs = auth.user?.preferences;
-    if (!prefs) return;
-    if (
-      (prefs.default_mode === 'simple' ||
-        prefs.default_mode === 'knowledge' ||
-        prefs.default_mode === 'think') &&
-      prefs.default_mode !== mode
-    ) {
-      setMode(prefs.default_mode);
-      try {
-        window.localStorage.setItem('chatapp.mode', prefs.default_mode);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (prefs.default_model && !model) {
-      setModel(prefs.default_model);
-      try {
-        window.localStorage.setItem('chatapp.model', prefs.default_model);
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [auth.isReady, auth.user]);
+    if (!defaultModel) return;
+    if (model) return;
+    setModel(defaultModel);
+  }, [defaultModel, model]);
 
-  const refreshSessions = useCallback(async () => {
-    if (!auth.user) return;
-    try {
-      const list = await api.listSessions();
-      setSessions(list);
-    } catch (err) {
-      setError((err as Error).message);
+  // When the user clicks the LLM pill, force-refresh the connectivity
+  // probe (the useQuery cache updates for all observers).
+  const probeConnectivity = useCallback(async () => {
+    if (!auth.user) return null;
+    const res = await refetchConnectivity();
+    const data = res.data;
+    if (data && !data.ok) {
+      setError(`${data.provider} failed: ${data.error}`);
     }
-  }, [auth.user]);
-
-  const refreshHealth = useCallback(async () => {
-    try {
-      const h = await api.health();
-      setHealth(h.status);
-    } catch {
-      setHealth('down');
-    }
-  }, []);
-
-  const refreshModels = useCallback(async () => {
-    if (!auth.user) return;
-    try {
-      const m = await api.listModels();
-      setModels(m);
-      setModel((prev) => (prev ? prev : m[0]?.model ?? ''));
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }, [auth.user]);
-
-  const probeConnectivity = useCallback(
-    async (targetModel?: string) => {
-      if (!auth.user) return null;
-      setCheckingConn(true);
-      try {
-        const res = await api.connectivity(targetModel ?? (model || undefined));
-        setConnectivity(res);
-        if (!res.ok) {
-          setError(`${res.provider} failed: ${res.error}`);
-        }
-        return res;
-      } catch (err) {
-        const msg = (err as Error).message;
-        setConnectivity({
-          ok: false,
-          provider: 'unknown',
-          model: targetModel ?? model ?? '',
-          latency_ms: 0,
-          error: msg,
-        });
-        setError(msg);
-        return null;
-      } finally {
-        setCheckingConn(false);
-      }
-    },
-    [auth.user, model],
-  );
-
-  useEffect(() => {
-    if (!auth.user) return;
-    refreshHealth();
-    refreshModels();
-    refreshSessions();
-    probeConnectivity();
-  }, [auth.user, refreshHealth, refreshModels, refreshSessions, probeConnectivity]);
+    return data ?? null;
+  }, [auth.user, refetchConnectivity]);
 
   // Tracks whether a stream is currently mutating `turns[]`. The URL-change
   // effect below must NOT clobber that local state — otherwise on /chat
@@ -211,7 +231,7 @@ export function useChat() {
     if (!input.trim() || streaming) return;
     setError(null);
 
-    const probe = await probeConnectivity(model || undefined);
+    const probe = await probeConnectivity();
     if (!probe || !probe.ok) return;
 
     let sessionId = currentSessionId;
@@ -219,7 +239,15 @@ export function useChat() {
       try {
         const created = await api.createSession(undefined, model || undefined);
         sessionId = created.id;
-        await refreshSessions();
+        // Optimistic insert into the shared session cache so the sidebar
+        // shows the new session immediately (without waiting for a
+        // refetch round-trip). Background refetch via invalidateQueries
+        // will reconcile the title with the server's LLM-refined version.
+        qc.setQueryData<ChatSession[]>(['chat', 'sessions'], (prev) => [
+          created,
+          ...(prev ?? []),
+        ]);
+        void qc.invalidateQueries({ queryKey: ['chat', 'sessions'] });
         navigate(`/chat/${created.id}`);
       } catch (err) {
         setError((err as Error).message);
@@ -274,8 +302,9 @@ export function useChat() {
             : t,
         ),
       );
-      const list = await api.listSessions();
-      setSessions(list);
+      // Refetch the session list so the sidebar picks up the LLM-refined
+      // title (only for first messages ≥ 30 chars).
+      void qc.invalidateQueries({ queryKey: ['chat', 'sessions'] });
     } catch (err) {
       setError((err as Error).message);
       setTurns((prev) =>
@@ -284,13 +313,8 @@ export function useChat() {
     } finally {
       streamingRef.current = false;
       setStreaming(false);
-      // The immediate (verbatim or truncated) title is already in DB after
-      // step 1 of the request, and the existing `listSessions()` call above
-      // pulls it into the sidebar right when the stream finishes. The
-      // background LLM-refined title (only for first messages ≥ 30 chars)
-      // will appear on the next manual refresh / session switch / new chat.
     }
-  }, [currentSessionId, input, streaming, model, mode, probeConnectivity, refreshSessions, navigate]);
+  }, [currentSessionId, input, streaming, model, mode, probeConnectivity, navigate, qc]);
 
   const stop = useCallback(() => {
     // Streaming cannot be aborted yet without an AbortController on the
@@ -301,7 +325,11 @@ export function useChat() {
     async (id: string) => {
       try {
         await api.deleteSession(id);
-        await refreshSessions();
+        // Optimistic remove from the shared session cache so both
+        // AppShell and ChatPage see the sidebar update.
+        qc.setQueryData<ChatSession[]>(['chat', 'sessions'], (prev) =>
+          (prev ?? []).filter((s) => s.id !== id),
+        );
         if (id === currentSessionId) {
           navigate('/chat');
         }
@@ -309,7 +337,7 @@ export function useChat() {
         setError((err as Error).message);
       }
     },
-    [currentSessionId, refreshSessions, navigate],
+    [currentSessionId, navigate, qc],
   );
 
   const handleLogout = useCallback(() => {
@@ -327,6 +355,8 @@ export function useChat() {
     setInput,
     model,
     setModel,
+    defaultModel,
+    setDefaultModel,
     mode,
     setMode,
     streaming,

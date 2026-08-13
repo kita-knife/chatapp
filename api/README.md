@@ -11,8 +11,8 @@ These four commands take you from "PostgreSQL exists, code is cloned" to
 # 1. Install Python deps (creates .venv/)
 uv sync
 
-# 2. Configure env (then edit LLM_API_KEY / WEB_BASE_URL / DATABASE_URL)
-cp .env.example .env
+# 2. Configure the app (then edit llm.primary.api_key, web_base_url, etc.)
+cp config.example.yml config.yml
 
 # 3. Create the Postgres database (once per machine — pick your own name)
 PGPASSWORD=postgreswsl psql -h localhost -p 5433 -U postgres \
@@ -132,26 +132,24 @@ agno is used as the provider layer. The provider is selected by model prefix:
 
 | Model prefix | Provider |
 |---|---|
-| `minimax*` | MiniMax OpenAI-compatible (default) |
+| `minimax*` | `openlike` — OpenAI-compatible (uses `llm.openlike.*` in `config.yml`) |
 | `gpt-*`, `o*`, `chatgpt-*` | OpenAI |
 | `claude*` | Anthropic |
 | `ollama:*`, `llama*`, `qwen*`, `mistral*` | Ollama (local) |
 
-If the model doesn't match any prefix, the request falls back to the configured MiniMax endpoint.
+If the model doesn't match any prefix, the request falls back to the configured openlike endpoint.
 
 ## Config
 
-See `.env.example` for the full template. The key variables are:
+All configuration lives in `config.yml` (template at `config.example.yml`).
+The file is required — the process exits at startup if it is missing.
+You can override its path with the `CONFIG_PATH` environment variable.
 
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_API_BASE` | `https://api.minimax.chat/v1` | OpenAI-compatible endpoint |
-| `LLM_API_KEY` | _(empty)_ | API key for the endpoint above |
-| `LLM_MODEL` | `MiniMax-M3` | Default model |
-| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | _(empty)_ | Optional OpenAI hook |
-| `ANTHROPIC_API_KEY` | _(empty)_ | Optional Anthropic hook |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Optional Ollama hook |
-| `POSTGRES_*` | `localhost:5433` / `chatapp` / `postgres` / `postgreswsl` | DB connection |
+Only `DATABASE_URL` is also read from the shell environment; Railway /
+Heroku / PaaS providers inject it on linked services and the loader gives
+it priority over the YAML `database.url` / `database.postgres.*` block.
+
+The full annotated template is at [`api/config.example.yml`](config.example.yml).
 
 ## Layout
 
@@ -160,7 +158,7 @@ api/
 ├── app/
 │   ├── main.py                 # FastAPI entrypoint
 │   ├── core/
-│   │   ├── config.py           # pydantic-settings
+│   │   ├── config.py           # YAML settings loader
 │   │   └── db.py               # SQLAlchemy async engine
 │   ├── api/
 │   │   └── router.py           # /api router
@@ -170,6 +168,7 @@ api/
 │           ├── routes.py       # /api/chat/*
 │           ├── service.py      # History + dispatch
 │           └── providers.py    # agno provider layer
+├── config.example.yml          # template — copy to config.yml
 ├── pyproject.toml
-└── .env.example
+└── config.yml                  # gitignored, your local copy
 ```

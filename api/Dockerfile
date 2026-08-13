@@ -28,6 +28,9 @@ RUN uv sync --frozen --no-dev
 # --- application layer ---
 COPY app ./app
 COPY README.md ./README.md
+# Ship the config template as a reference; `config.yml` itself is provided
+# at runtime via a Railway variable / volume mount / CONFIG_PATH.
+COPY config.example.yml ./config.example.yml
 
 # Drop privileges (best-effort; Railway runs as non-root by default).
 RUN useradd --create-home --shell /bin/bash --uid 1000 appuser 2>/dev/null || true

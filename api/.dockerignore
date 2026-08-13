@@ -10,6 +10,8 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+config.yml
+config.local.yml
 .git/
 .gitignore
 Dockerfile

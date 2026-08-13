@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import { useMyPreferences, useUpdateMyPreferences } from '@/features/auth/useAuth';
 import { useChat } from '@/hooks/useChat';
 import { AGENT_MODES } from '@/components/ChatInput';
@@ -13,7 +12,6 @@ export function SettingsPage() {
   const prefs = useMyPreferences();
   const update = useUpdateMyPreferences();
   const chat = useChat();
-  const qc = useQueryClient();
   const [saved, setSaved] = useState(false);
 
   const current = prefs.data;
@@ -63,21 +61,7 @@ export function SettingsPage() {
         <div className="form-row-group">
           <select
             value={current.default_model ?? ''}
-            onChange={(e) => {
-              const newModel = e.target.value || null;
-              save({ default_model: newModel });
-              // Mirror to the local TanStack Query cache so ChatInput's
-              // model select reflects the new default without waiting for
-              // a refetch round-trip. (`save` above invalidates
-              // ['auth','me','preferences'], which Settings' own select reads
-              // from — but the chat input reads `['ui','model']` instead.)
-              qc.setQueryData(['ui', 'model'], newModel ?? '');
-              try {
-                window.localStorage.setItem('chatapp.model', newModel ?? '');
-              } catch {
-                /* ignore */
-              }
-            }}
+            onChange={(e) => save({ default_model: e.target.value || null })}
             className="select"
           >
             <option value="">Use system default ({chat.models[0]?.model ?? 'unset'})</option>

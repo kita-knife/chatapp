@@ -1,0 +1,57 @@
+# ChatApp-PG API — configuration template.
+#
+# Copy to `config.yml` next to this file and edit. `config.yml` is gitignored.
+# Priority (highest first):
+#   1. Shell environment for runtime-injected variables — currently only
+#      `DATABASE_URL` (Railway / Heroku / etc. set this on linked services).
+#   2. Values in this file.
+#
+# Path can be overridden via the `CONFIG_PATH` env var (useful for Railway
+# volume mounts pointing at a generated config).
+
+app:
+  env: development                 # logged at startup
+  host: 0.0.0.0                    # documentation only; actual bind comes from uvicorn CLI
+  port: 8000                       # documentation only
+  web_base_url: http://localhost:5173   # CORS allow-list (must match the URL the browser opens)
+
+database:
+  # If `url` is set, it overrides the `postgres.*` block below. In Railway /
+  # Heroku / PaaS deployments, leave this as null and let `DATABASE_URL` be
+  # injected via the environment.
+  url: null
+  postgres:
+    host: localhost
+    port: 5433
+    database: chatapp
+    user: postgres
+    password: postgreswsl
+
+llm:
+  openlike:                         # OpenAI-compatible default endpoint (any OpenAI-compatible API)
+    api_base: https://api.minimax.chat/v1
+    api_key: ""                     # required for streaming to work
+    model: MiniMax-M3
+  openai:
+    api_key: ""
+    base_url: ""                    # empty → defaults to https://api.openai.com/v1 when key is set
+    default_model: gpt-4o-mini      # shown in the UI picker
+  anthropic:
+    api_key: ""
+    default_model: claude-3-5-sonnet-latest
+  ollama:
+    base_url: http://localhost:11434
+    default_model: llama3.2
+
+auth:
+  max_root_users: 4                 # cap on `root` accounts (CLI + API both enforce)
+  root_username_min_len: 3
+  root_password_min_len: 8
+  session:
+    ttl_seconds: 604800             # 7 days
+    cookie_name: chatapp_session
+    cookie_secure: false            # set true in production (HTTPS)
+
+prompts:
+  file: app/core/prompts.yml        # prompt content source (YAML)
+  reload: false                     # set true to re-read the prompt file on every access

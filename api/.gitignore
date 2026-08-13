@@ -5,3 +5,5 @@ __pycache__
 .venv
 .env
 .env.local
+config.yml
+config.local.yml

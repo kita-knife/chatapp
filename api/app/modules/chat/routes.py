@@ -58,8 +58,8 @@ def _turn_dict(m: ChatMessage) -> dict:
 @router.get("/models")
 async def get_models(current: Annotated[User, Depends(get_current_user)]) -> list[dict]:
     models: list[dict[str, str]] = []
-    if settings.llm_model:
-        models.append({"provider": "minimax", "model": settings.llm_model})
+    if settings.openlike_model:
+        models.append({"provider": "openlike", "model": settings.openlike_model})
     if settings.openai_default_model:
         models.append({"provider": "openai", "model": settings.openai_default_model})
     if settings.ollama_default_model:
@@ -67,7 +67,7 @@ async def get_models(current: Annotated[User, Depends(get_current_user)]) -> lis
     if settings.anthropic_default_model:
         models.append({"provider": "anthropic", "model": settings.anthropic_default_model})
     if not models:
-        models.append({"provider": "minimax", "model": "MiniMax-M3"})
+        models.append({"provider": "openlike", "model": "MiniMax-M3"})
     return models
 
 
@@ -76,7 +76,7 @@ async def connectivity(
     model: str = Query(default=""),
     current: Annotated[User, Depends(get_current_user)] = None,  # noqa: B008
 ) -> dict:
-    target = model or settings.llm_model
+    target = model or settings.openlike_model
     provider = resolve_provider_for_model(target)
     return await check_connectivity(provider, target)
 
@@ -89,7 +89,7 @@ async def create_session(
     cs = await service.create_session(
         owner_id=current.id,
         title=payload.title or "New chat",
-        model=payload.model or settings.llm_model,
+        model=payload.model or settings.openlike_model,
     )
     return _session_dict(cs)
 

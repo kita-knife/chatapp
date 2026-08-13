@@ -50,7 +50,7 @@ Node 22+.
 chatapp-pg/
 ├── api/
 │   ├── app/
-│   │   ├── core/                  # config, db, security, prompts.yml, prompts.py
+│   │   ├── core/                  # config (YAML loader), db, security, prompts.yml, prompts.py
 │   │   ├── api/router.py          # /api/* mount
 │   │   ├── cli/                   # `python -m app.cli` (create-root)
 │   │   └── modules/
@@ -58,6 +58,7 @@ chatapp-pg/
 │   │       │   └── users/         # root-only user CRUD
 │   │       ├── chat/             # sessions, messages (turns), providers
 │   │       └── users_prefs/      # preferences table + endpoints
+│   ├── config.example.yml         # template — copy to config.yml
 │   ├── Dockerfile                # Python 3.12-slim + uv + libpq
 │   ├── railway.toml              # Railway service config
 │   └── pyproject.toml
@@ -236,24 +237,29 @@ schema are created by the migration in step 3.
 
 ```bash
 cd api
-cp .env.example .env
+cp config.example.yml config.yml
 ```
 
-Edit `.env`. The three things that must be set before anything works:
+Edit `config.yml`. The three things that must be set before anything works:
 
-```bash
-# Required — primary LLM endpoint
-LLM_API_BASE=https://api.minimax.chat/v1
-LLM_API_KEY=sk-...
+```yaml
+app:
+  web_base_url: http://localhost:5173   # CORS allow-list (must match the URL the browser opens)
 
-# Required — CORS allow-list. Include the URL you'll open the web UI from.
-# For local dev:
-WEB_BASE_URL=http://localhost:5173
+llm:
+  primary:
+    api_base: https://api.minimax.chat/v1
+    api_key: sk-...
 
-# Database is auto-resolved from POSTGRES_* defaults in .env.example.
-# Override here only if your Postgres is elsewhere:
-# DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/chatapp
+# Database is auto-resolved from the `database.postgres.*` defaults in
+# config.example.yml. Override here only if your Postgres is elsewhere:
+# database:
+#   url: postgresql+asyncpg://user:pass@host:5432/chatapp
 ```
+
+Railway / Heroku / PaaS deployments inject `DATABASE_URL` via the shell
+environment; that value takes priority over the YAML's `database.url` and
+`database.postgres.*` blocks.
 
 Then install Python dependencies (creates `.venv/`):
 
@@ -346,9 +352,9 @@ PGPASSWORD=postgreswsl psql -h localhost -p 5433 -U postgres \
 
 # 2. Backend
 cd api
-cp .env.example .env            # then edit LLM_API_KEY / WEB_BASE_URL
+cp config.example.yml config.yml   # then edit llm.primary.api_key, web_base_url
 uv sync
-uv run alembic upgrade head    # creates ai schema + 5 tables
+uv run alembic upgrade head        # creates ai schema + 5 tables
 uv run python -m app.cli create-root --username root --password 'YOUR_PW'
 uv run uvicorn app.main:app --reload --port 8000
 
@@ -395,37 +401,17 @@ access (useful while iterating).
 
 ## Config reference
 
-All variables live in `api/.env` (or shell env, or `api/app/core/config.py`
-defaults — in that priority). The full list as defined by
-`app.core.config.Settings`:
+Configuration is read from `api/config.yml` (template at
+[`api/config.example.yml`](api/config.example.yml)). The file is required —
+the process exits at startup if it is missing. Override the path with
+`CONFIG_PATH=/path/to/config.yml` (used by Railway volume mounts).
 
-| Variable | Default | Description |
-|---|---|---|
-| `APP_ENV` | `development` | Environment name (logged at startup) |
-| `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | Backend bind. **Not read by code** — actual port comes from the uvicorn CLI / Dockerfile. Kept for documentation. |
-| `WEB_BASE_URL` | `http://localhost:5173` | CORS allow-list (frontend origin). Must match the URL the browser opens. |
-| `DATABASE_URL` | _(unset)_ | **Override**. Railway / PaaS inject this. Auto-normalized to `postgresql+asyncpg://…` |
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | `localhost` / `5433` / `chatapp` / `postgres` / `postgreswsl` | Fallback when `DATABASE_URL` is unset |
-| `LLM_API_BASE` | `https://api.minimax.chat/v1` | Primary endpoint (OpenAI-compatible) |
-| `LLM_API_KEY` | _(empty)_ | Required for streaming to work |
-| `LLM_MODEL` | `MiniMax-M3` | Default model id |
-| `OPENAI_API_KEY` | _(empty)_ | Optional OpenAI provider key |
-| `OPENAI_BASE_URL` | _(empty)_ | Optional OpenAI base URL (defaults to `https://api.openai.com/v1` if key is set) |
-| `OPENAI_DEFAULT_MODEL` | `gpt-4o-mini` | Shown in the UI picker when OpenAI provider is available |
-| `ANTHROPIC_API_KEY` | _(empty)_ | Optional Anthropic provider key |
-| `ANTHROPIC_DEFAULT_MODEL` | `claude-3-5-sonnet-latest` | Shown in the UI picker when Anthropic provider is available |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint |
-| `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Shown in the UI picker when Ollama provider is available |
-| `MAX_ROOT_USERS` | `4` | Cap on `root` accounts (CLI + API both enforce) |
-| `ROOT_USERNAME_MIN_LEN` | `3` | Min length for username in `create-root` and `/api/auth/users` |
-| `ROOT_PASSWORD_MIN_LEN` | `8` | Min length for password in `create-root` and `/api/auth/users` |
-| `SESSION_TTL_SECONDS` | `604800` | Cookie lifetime (7 days) |
-| `SESSION_COOKIE_NAME` | `chatapp_session` | Cookie key name (rename to invalidate all sessions) |
-| `SESSION_COOKIE_SECURE` | `false` | Set `true` in production (HTTPS) so the browser sends the cookie over secure channels only |
-| `PROMPTS_FILE` | `app/core/prompts.yml` | Override prompt source |
-| `PROMPTS_RELOAD` | `false` | Hot-reload prompts on every access (useful while iterating) |
+Only `DATABASE_URL` is also read from the shell environment (Railway /
+Heroku / PaaS inject it on linked services); when set, it wins over the
+YAML `database.url` and `database.postgres.*` blocks.
 
-The complete annotated template is at [`api/.env.example`](api/.env.example).
+The full YAML schema (every field with its default and meaning) is at
+[`api/config.example.yml`](api/config.example.yml).
 
 ## Deployment (Railway)
 
@@ -453,18 +439,34 @@ services** (postgres + api + web).
 3. **Add the API service**
    - New → GitHub Repo (same repo)
    - Settings → **Root Directory** = `api`
-   - **Variables**:
+   - Provide `config.yml` to the container. Two options:
+     - **Volume mount**: Settings → Volumes → Mount a file at `/app/config.yml`,
+       or use a **Config Variable** and pipe it through an entrypoint wrapper.
+     - **Bake into the image** (only if you're OK rebuilding on every
+       change): add a `COPY config.yml ./config.yml` step above the
+       uvicorn `CMD` in `api/Dockerfile`.
+   - **Environment variables** (only `DATABASE_URL` is read from the shell;
+     everything else lives in `config.yml`):
 
      | Key | Value |
      |---|---|
      | `DATABASE_URL` | `{{ postgres.DATABASE_URL }}` |
-     | `LLM_API_BASE` | `https://api.minimax.chat/v1` |
-     | `LLM_API_KEY` | your sk-… |
-     | `LLM_MODEL` | `MiniMax-M3` |
-     | `WEB_BASE_URL` | _fill after web deploys_ (see step 5) |
-     | `SESSION_COOKIE_SECURE` | `true` |
-     | `SESSION_SECRET` | `python -c "import secrets;print(secrets.token_hex(32))"` |
-     | `MAX_ROOT_USERS` | `4` |
+
+   - In `config.yml` set, at minimum:
+
+     ```yaml
+     app:
+       web_base_url: https://chatapp-pg-web.up.railway.app   # backfill after step 5
+     llm:
+       primary:
+         api_base: https://api.minimax.chat/v1
+         api_key: sk-...
+         model: MiniMax-M3
+     auth:
+       max_root_users: 4
+       session:
+         cookie_secure: true   # production over HTTPS
+     ```
 
 4. **Add the Web service**
    - New → GitHub Repo (same repo)

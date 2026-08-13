@@ -11,15 +11,29 @@ from app.modules.users_prefs.models import DEFAULT_PREFERENCES, UserPreference
 
 
 async def get_preferences(user_id: UUID) -> dict:
-    """Return the user's effective preferences (defaults merged in)."""
+    """Return the user's effective preferences (defaults merged in).
+
+    When the user has never set `default_model`, fall back to the system
+    default from `config.yml` (`llm.openlike.model`) so the frontend always
+    sees a concrete value. The DB row is NOT mutated — explicit user
+    choices still win on next read.
+    """
     async with session_scope() as session:
         result = await session.execute(
             select(UserPreference).where(UserPreference.user_id == user_id)
         )
         row = result.scalar_one_or_none()
         if row is None:
-            return dict(DEFAULT_PREFERENCES)
-        return row.view()
+            prefs = dict(DEFAULT_PREFERENCES)
+        else:
+            prefs = row.view()
+
+    if not prefs.get("default_model"):
+        from app.core.config import settings
+
+        prefs["default_model"] = settings.openlike_model
+
+    return prefs
 
 
 async def get_raw_preferences(user_id: UUID) -> dict:

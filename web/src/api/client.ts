@@ -3,11 +3,24 @@ import { notifyAuthError } from '@/authEvents';
 export interface UserPreferences {
   default_mode: 'simple' | 'knowledge' | 'think';
   default_model: string | null;
+  default_project: string | null;
   system_prompt_overrides: {
     think: string | null;
     knowledge: string | null;
   };
   ui_language: 'zh' | 'en';
+}
+
+export interface ToolCallEvent {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ToolResultEvent {
+  tool_call_id: string;
+  name: string;
+  result: string;
 }
 
 export interface User {
@@ -43,6 +56,8 @@ export interface ChatTurn {
   status: 'pending' | 'streaming' | 'complete' | 'error' | 'interrupted';
   created_at: string;
   updated_at: string;
+  tool_calls?: ToolCallEvent[];
+  tool_results?: ToolResultEvent[];
 }
 
 export interface ModelInfo {
@@ -56,6 +71,8 @@ export interface StreamChunk {
   error?: string | null;
   tokens_in?: number;
   tokens_out?: number;
+  tool_call?: ToolCallEvent | null;
+  tool_result?: ToolResultEvent | null;
 }
 
 export interface ConnectivityResult {
@@ -170,6 +187,7 @@ export const api = {
     return jsonRequest<ConnectivityResult>(`/api/chat/connectivity${qs}`);
   },
   listSessions: () => jsonRequest<ChatSession[]>('/api/chat/sessions'),
+  listProjects: () => jsonRequest<string[]>('/api/chat/projects'),
   createSession: (title?: string, model?: string) =>
     jsonRequest<ChatSession>('/api/chat/sessions', {
       method: 'POST',
@@ -184,13 +202,14 @@ export const api = {
     content: string,
     model?: string,
     mode?: string,
+    project?: string,
   ): AsyncGenerator<StreamChunk> {
     const path = apiPath(`/api/chat/sessions/${sessionId}/messages`);
     const res = await fetch(path, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, model, mode }),
+      body: JSON.stringify({ content, model, mode, project }),
     });
     if (!res.ok || !res.body) {
       const err = new ApiError(

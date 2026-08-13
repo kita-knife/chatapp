@@ -760,6 +760,16 @@ select {
   background: var(--panel-3);
 }
 
+.project-select {
+  font-weight: 600;
+  border-color: var(--accent);
+}
+
+.select-missing {
+  border-color: #d97706;
+  color: #d97706;
+}
+
 /* ----- Placeholder pages ----- */
 
 .placeholder-page {
@@ -939,4 +949,54 @@ select {
 .role-pill.role-user {
   background: var(--panel-3);
   color: #93c5fd;
+}
+
+/* ----- Tool call trace (rendered above assistant reply) ----- */
+
+.tool-trace {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.tool-trace summary {
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+}
+
+.tool-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-name {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.tool-args,
+.tool-result {
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 4px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.tool-result {
+  color: var(--muted);
 }

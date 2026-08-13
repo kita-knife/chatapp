@@ -55,3 +55,13 @@ auth:
 prompts:
   file: app/core/prompts.yml        # prompt content source (YAML)
   reload: false                     # set true to re-read the prompt file on every access
+
+# ---------- Graph DB (library_coderag schema) ----------
+# Schema name for the code-RAG knowledge graph. Tools in
+# app/modules/chat/tools/ read this and route queries to it.
+# The `default_project` is the project used by tools when a user has not
+# picked one (e.g. CLI / smoke tests). Users pick their own project from
+# the ChatInput dropdown; that choice is stored in user_preferences.
+graph:
+  schema: library_coderag
+  default_project: ""

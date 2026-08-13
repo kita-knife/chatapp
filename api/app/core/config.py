@@ -115,12 +115,23 @@ class PromptsCfg(BaseModel):
     reload: bool = False
 
 
+class GraphCfg(BaseModel):
+    """Graph DB (library_coderag) connection settings used by tools."""
+
+    # `schema` shadows BaseModel.schema(); use a distinct field name.
+    schema_name: str = Field(default="library_coderag", alias="schema")
+    default_project: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
 class RootCfg(BaseModel):
     app: AppCfg = Field(default_factory=AppCfg)
     database: DatabaseCfg = Field(default_factory=DatabaseCfg)
     llm: LlmCfg = Field(default_factory=LlmCfg)
     auth: AuthCfg = Field(default_factory=AuthCfg)
     prompts: PromptsCfg = Field(default_factory=PromptsCfg)
+    graph: GraphCfg = Field(default_factory=GraphCfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +169,10 @@ class Settings(BaseSettings):
     # ---------- Prompts ----------
     prompts_file: str = "app/core/prompts.yml"
     prompts_reload: bool = False
+
+    # ---------- Graph DB (library_coderag schema) ----------
+    graph_schema: str = "library_coderag"
+    graph_default_project: str = ""
 
     # ---------- Optional second endpoints (OpenAI / Anthropic / Ollama) ----------
     openai_api_key: str = ""
@@ -253,6 +268,8 @@ def _flatten(cfg: RootCfg) -> dict[str, object]:
         "session_cookie_secure": cfg.auth.session.cookie_secure,
         "prompts_file": cfg.prompts.file,
         "prompts_reload": cfg.prompts.reload,
+        "graph_schema": cfg.graph.schema_name,
+        "graph_default_project": cfg.graph.default_project,
         "openai_api_key": cfg.llm.openai.api_key,
         "openai_base_url": cfg.llm.openai.base_url,
         "anthropic_api_key": cfg.llm.anthropic.api_key,

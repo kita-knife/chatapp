@@ -1,11 +1,17 @@
 import type { ModelInfo } from '../api/client';
 
 export type AgentMode = 'simple' | 'knowledge' | 'think';
+export type UiLanguage = 'zh' | 'en';
 
 export const AGENT_MODES: { value: AgentMode; label: string; description: string }[] = [
   { value: 'simple', label: 'Simple', description: 'straightforward chat' },
   { value: 'knowledge', label: 'Knowledge', description: 'RAG-augmented answers' },
   { value: 'think', label: 'Think', description: 'deeper reasoning' },
+];
+
+export const LANGUAGES: { value: UiLanguage; label: string }[] = [
+  { value: 'zh', label: '中文' },
+  { value: 'en', label: 'English' },
 ];
 
 interface Props {
@@ -19,6 +25,11 @@ interface Props {
   models: ModelInfo[];
   mode: AgentMode;
   setMode: (v: AgentMode) => void;
+  language: UiLanguage;
+  setLanguage: (v: UiLanguage) => void;
+  project: string;
+  setProject: (v: string) => void;
+  projects: string[];
   checking?: boolean;
 }
 
@@ -33,11 +44,30 @@ export function ChatInput({
   models,
   mode,
   setMode,
+  language,
+  setLanguage,
+  project,
+  setProject,
+  projects,
   checking,
 }: Props) {
+  const projectMissing = project === '';
   return (
     <div className="chat-input">
       <div className="chat-input-row">
+        <select
+          className="select language-select"
+          value={language}
+          onChange={(e) => setLanguage(e.target.value as UiLanguage)}
+          disabled={streaming}
+          title="UI language"
+        >
+          {LANGUAGES.map((l) => (
+            <option key={l.value} value={l.value}>
+              {l.label}
+            </option>
+          ))}
+        </select>
         <select
           className="select mode-select"
           value={mode}
@@ -64,6 +94,20 @@ export function ChatInput({
             </option>
           ))}
         </select>
+        <select
+          className={`select project-select ${projectMissing ? 'select-missing' : ''}`}
+          value={project}
+          onChange={(e) => setProject(e.target.value)}
+          disabled={streaming}
+          title={projectMissing ? 'Select a project before chatting' : 'Project'}
+        >
+          <option value="">{projectMissing ? '— pick project —' : '(none)'}</option>
+          {projects.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="chat-input-row">
         <textarea
@@ -87,7 +131,8 @@ export function ChatInput({
           <button
             className="btn-primary"
             onClick={onSend}
-            disabled={!input.trim() || checking}
+            disabled={!input.trim() || checking || projectMissing}
+            title={projectMissing ? 'Pick a project first' : undefined}
           >
             {checking ? 'Checking…' : 'Send'}
           </button>

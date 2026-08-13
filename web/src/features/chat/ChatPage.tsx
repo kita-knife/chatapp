@@ -37,6 +37,11 @@ export function ChatPage() {
         models={chat.models}
         mode={chat.mode}
         setMode={chat.setMode}
+        language={chat.uiLanguage}
+        setLanguage={chat.setLanguage}
+        project={chat.project}
+        setProject={chat.setProject}
+        projects={chat.projects}
         checking={chat.checkingConn}
       />
     </div>

@@ -47,6 +47,19 @@ StreamItem = Tuple[ChatChunk, bool, dict[str, Any]]
 
 AUTO_TITLE_ON_FIRST_MESSAGE = True
 
+# Tools exposed to the model during chat. These names must match the keys
+# in `app.modules.chat.tools.TOOL_REGISTRY`. To disable a tool, remove it
+# from this list. To enable a new tool, register it in `TOOL_REGISTRY` and
+# add the name here.
+ENABLED_TOOLS: list[str] = [
+    "execute_sql",
+    "get_db_schema",
+    "graphdb_retrieve_relationships",
+    "graphdb_retrievedby_keywords",
+    "project_partial_index_retriever",
+    "project_whole_index_retriever",
+]
+
 
 # ---------------- sessions (owner-scoped) ----------------
 
@@ -122,6 +135,7 @@ async def stream_chat_response(
     user_content: str,
     model: str | None = None,
     mode: str | None = None,
+    project: str | None = None,
 ) -> AsyncIterator[StreamItem]:
     """Create a single turn row (user_content filled, status=streaming), stream
     the assistant reply into the same row's assistant_content, then mark
@@ -129,6 +143,9 @@ async def stream_chat_response(
 
     If `mode` is not provided, the user's stored preference is consulted.
     Priority: explicit `mode` arg > DB preference > settings default ('simple').
+
+    `project` (when None) is read from user_preferences.default_project —
+    the library_coderag project that tools query against.
     """
     needs_title = False
     needs_title_llm = False
@@ -182,6 +199,13 @@ async def stream_chat_response(
             pref_model = prefs.get("default_model")
             if pref_model:
                 used_model = pref_model
+        # Resolve effective project from preferences (always read; tools
+        # need it to bind `:project`). Empty string means none picked.
+        if project is None:
+            from app.modules.users_prefs import service as prefs_service
+
+            prefs = await prefs_service.get_preferences(owner_id)
+            project = prefs.get("default_project") or ""
 
     # Step 2: stream — update the row in place between chunks.
     provider_name = resolve_provider_for_model(used_model)
@@ -202,7 +226,10 @@ async def stream_chat_response(
     tokens_in = 0
     tokens_out = 0
     final_reason: str | None = "stop"
-    async for chunk in stream_chat(provider_name, history, used_model, mode=effective_mode):
+    async for chunk in stream_chat(
+        provider_name, history, used_model, mode=effective_mode, project=project,
+        tools=ENABLED_TOOLS,
+    ):
         if chunk.delta:
             full_text_parts.append(chunk.delta)
         if chunk.tokens_in:

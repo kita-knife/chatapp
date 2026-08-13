@@ -7,6 +7,12 @@
  * Shared state (read by both AppShell and ChatPage) lives in TanStack
  * Query's singleton cache so the two useChat instances see the same data.
  * Per-page state (input, turns, currentSessionId) stays local.
+ *
+ * Default selections (language, mode, model) all live in `user_preferences`
+ * on the server. The dropdowns in ChatInput are the only writers: each
+ * `onChange` PATCHes `/api/auth/me/preferences`, the auth query invalidates,
+ * and `useChat` consumers re-render with the new value. This is the only
+ * source of truth — there is no parallel local state for these.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -20,12 +26,19 @@ import {
 } from '@/api/client';
 import { useAuth } from '@/features/auth/useAuth';
 import { useLogout } from '@/features/auth/useAuth';
-import type { AgentMode } from '@/components/ChatInput';
+import { useUpdateMyPreferences } from '@/features/auth/useAuth';
+import type { AgentMode, UiLanguage } from '@/components/ChatInput';
+
+// How long a connectivity-probe failure stays in the error banner before
+// auto-dismissing. Manual probes shouldn't leave a permanent "LLM ✗" toast
+// when the user just clicks the LLM pill to re-check.
+const PROBE_ERROR_DISMISS_MS = 3000;
 
 export function useChat() {
   const navigate = useNavigate();
   const auth = useAuth();
   const logout = useLogout();
+  const updateMyPreferences = useUpdateMyPreferences();
   const qc = useQueryClient();
 
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
@@ -51,7 +64,7 @@ export function useChat() {
   });
   const health = healthQuery.data?.status ?? (healthQuery.isError ? 'down' : 'unknown');
 
-  // Models list — AppShell's picker, ChatInput's picker, Settings' picker.
+  // Models list — AppShell's picker, ChatInput's picker.
   const modelsQuery = useQuery<ModelInfo[]>({
     queryKey: ['chat', 'models'],
     queryFn: () => api.listModels(),
@@ -60,17 +73,34 @@ export function useChat() {
   });
   const models = modelsQuery.data ?? [];
 
-  // Connectivity probe — per-model. `defaultModel` (server-backed) is
-  // the sidebar's selected default; `model` (declared below) is the
-  // current chat selection. The probe is keyed on the default — when the
-  // user changes the sidebar, the connectivity check refetches against
-  // the new default.
-  const defaultModel = auth.user?.preferences?.default_model ?? '';
+  // Available graph projects (for the project dropdown). Cached for the
+  // session since they only change when the underlying graph_folders table
+  // is reloaded (rare).
+  const projectsQuery = useQuery<string[]>({
+    queryKey: ['chat', 'projects'],
+    queryFn: () => api.listProjects(),
+    enabled: !!auth.user,
+    staleTime: 5 * 60_000,
+  });
+  const projects = projectsQuery.data ?? [];
+
+  // Default selections — single source of truth (server-backed).
+  // `model` is the dropdown's value AND the value send() uses; there is no
+  // separate "current selection" anymore. Backend's `get_preferences()`
+  // resolves null `default_model` to `settings.openlike_model`, so `model`
+  // is always a concrete identifier the dropdown can render.
+  const model = auth.user?.preferences?.default_model ?? '';
   const mode: AgentMode =
     (auth.user?.preferences?.default_mode as AgentMode | undefined) ?? 'simple';
+  const uiLanguage: UiLanguage =
+    (auth.user?.preferences?.ui_language as UiLanguage | undefined) ?? 'zh';
+  const project = auth.user?.preferences?.default_project ?? '';
+
+  // Connectivity probe — keyed on `model`, so picking a new dropdown
+  // value automatically triggers a refetch against the new model.
   const connectivityQuery = useQuery<ConnectivityResult | null>({
-    queryKey: ['chat', 'connectivity', defaultModel || ''],
-    queryFn: () => api.connectivity(defaultModel || undefined),
+    queryKey: ['chat', 'connectivity', model || ''],
+    queryFn: () => api.connectivity(model || undefined),
     enabled: !!auth.user,
     staleTime: 30_000,
     retry: false,
@@ -111,36 +141,50 @@ export function useChat() {
   );
 
   // —— Shared writes (mutations through server) ——————————————————————
-
-  // `defaultModel` (the sidebar's selected default — already declared
-  // above from `auth.user.preferences.default_model`) is written here via
-  // `setDefaultModel`. The sidebar's picker and Settings' "Default model"
-  // picker both call this; the server PATCH invalidates the auth query
-  // and every useAuth consumer re-renders with the new value.
   //
-  // `model` (declared below) is the *current selection* — what `send()`
-  // actually uses for the next message. It lives in local state and is
-  // initialized from `defaultModel` via the effect below. Picking in
-  // ChatInput only affects `model`, not `defaultModel`. Refreshing the
-  // page resets the selection back to `defaultModel`.
-  const setDefaultModel = useCallback((m: string) => {
-    void api.updateMyPreferences({ default_model: m || null }).catch(() => {
-      // Auth failures (401) are caught by the global authGuard; other
-      // failures don't have a good surface here.
-    });
-  }, []);
+  // Each setter below is the *only* writer for its preference key. We use
+  // the `useUpdateMyPreferences` mutation (not the raw `api.updateMyPreferences`)
+  // because the mutation's `onSuccess` invalidates the `auth` query —
+  // without that, `auth.user.preferences.*` stays stale, the dropdowns
+  // bound to `model` / `mode` / `uiLanguage` won't reflect the new value,
+  // and the connectivity probe (keyed on `model`) won't refetch.
+  //
+  // Mutations are fire-and-forget here; errors land in `updateMyPreferences.error`
+  // and surface via the auth guard for 401s. Other failures don't have a
+  // dedicated UI surface yet — same trade-off as before.
 
-  // `mode` is a single source (server default). Both ChatInput and the
-  // Settings "Default mode" picker write to `default_mode`.
-  const setMode = useCallback((m: AgentMode) => {
-    void api.updateMyPreferences({ default_mode: m }).catch(() => {});
-  }, []);
+  const setModel = useCallback(
+    (m: string) => {
+      updateMyPreferences.mutate({ preferences: { default_model: m || null } });
+    },
+    [updateMyPreferences],
+  );
+
+  const setMode = useCallback(
+    (m: AgentMode) => {
+      updateMyPreferences.mutate({ preferences: { default_mode: m } });
+    },
+    [updateMyPreferences],
+  );
+
+  const setLanguage = useCallback(
+    (l: UiLanguage) => {
+      updateMyPreferences.mutate({ preferences: { ui_language: l } });
+    },
+    [updateMyPreferences],
+  );
+
+  const setProject = useCallback(
+    (p: string) => {
+      updateMyPreferences.mutate({ preferences: { default_project: p || null } });
+    },
+    [updateMyPreferences],
+  );
 
   // —— Per-page state (only ChatPage / ChatInput read these) —————————
 
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
-  const [model, setModel] = useState('');
 
   // Reset transient state on logout.
   useEffect(() => {
@@ -159,28 +203,43 @@ export function useChat() {
       setInput('');
       setError(null);
     }
-  }, [auth.isReady, auth.user, qc]);
-
-  // Initialize `model` from `defaultModel` once the auth query has populated
-  // the user's server-side preferences. We only set `model` if it's still
-  // empty so a manual pick in ChatInput is preserved across re-renders.
-  useEffect(() => {
-    if (!defaultModel) return;
-    if (model) return;
-    setModel(defaultModel);
-  }, [defaultModel, model]);
+  }, [auth.isReady, auth.user, qc, setError]);
 
   // When the user clicks the LLM pill, force-refresh the connectivity
-  // probe (the useQuery cache updates for all observers).
+  // probe (the useQuery cache updates for all observers). On success we
+  // also clear any stale banner error left over from a previous failed
+  // probe — otherwise the user sees the last failure's message even after
+  // a successful probe. On failure the banner auto-dismisses after a short
+  // delay so a transient probe failure doesn't sit on screen forever.
+  const probeErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (probeErrorTimerRef.current) clearTimeout(probeErrorTimerRef.current);
+    },
+    [],
+  );
   const probeConnectivity = useCallback(async () => {
     if (!auth.user) return null;
+    // Cancel any pending auto-dismiss from a previous probe — we'll
+    // either schedule a new one (on failure) or clear immediately (on
+    // success).
+    if (probeErrorTimerRef.current) {
+      clearTimeout(probeErrorTimerRef.current);
+      probeErrorTimerRef.current = null;
+    }
     const res = await refetchConnectivity();
     const data = res.data;
     if (data && !data.ok) {
       setError(`${data.provider} failed: ${data.error}`);
+      probeErrorTimerRef.current = setTimeout(() => {
+        setError(null);
+        probeErrorTimerRef.current = null;
+      }, PROBE_ERROR_DISMISS_MS);
+    } else if (data && data.ok) {
+      setError(null);
     }
     return data ?? null;
-  }, [auth.user, refetchConnectivity]);
+  }, [auth.user, refetchConnectivity, setError]);
 
   // Tracks whether a stream is currently mutating `turns[]`. The URL-change
   // effect below must NOT clobber that local state — otherwise on /chat
@@ -209,7 +268,7 @@ export function useChat() {
     return () => {
       cancelled = true;
     };
-  }, [auth.user, currentSessionId]);
+  }, [auth.user, currentSessionId, setError]);
 
   const newSession = useCallback(() => {
     // Navigate to the empty chat route without creating a session row.
@@ -265,6 +324,8 @@ export function useChat() {
       user_tokens_in: 0,
       assistant_tokens_out: 0,
       status: 'streaming',
+      tool_calls: [],
+      tool_results: [],
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -276,13 +337,39 @@ export function useChat() {
     try {
       let lastTokensIn = 0;
       let lastTokensOut = 0;
-      for await (const chunk of api.streamMessage(sessionId, userContent, model || undefined, mode)) {
+      for await (const chunk of api.streamMessage(
+        sessionId,
+        userContent,
+        model || undefined,
+        mode,
+        project || undefined,
+      )) {
         if (chunk.error) setError(chunk.error);
         if (chunk.delta) {
           setTurns((prev) =>
             prev.map((t) =>
               t.id === tempTurnId
                 ? { ...t, assistant_content: (t.assistant_content || '') + chunk.delta }
+                : t,
+            ),
+          );
+        }
+        if (chunk.tool_call) {
+          const tc = chunk.tool_call;
+          setTurns((prev) =>
+            prev.map((t) =>
+              t.id === tempTurnId
+                ? { ...t, tool_calls: [...(t.tool_calls ?? []), tc] }
+                : t,
+            ),
+          );
+        }
+        if (chunk.tool_result) {
+          const tr = chunk.tool_result;
+          setTurns((prev) =>
+            prev.map((t) =>
+              t.id === tempTurnId
+                ? { ...t, tool_results: [...(t.tool_results ?? []), tr] }
                 : t,
             ),
           );
@@ -314,7 +401,7 @@ export function useChat() {
       streamingRef.current = false;
       setStreaming(false);
     }
-  }, [currentSessionId, input, streaming, model, mode, probeConnectivity, navigate, qc]);
+  }, [currentSessionId, input, streaming, model, mode, project, probeConnectivity, navigate, qc, setError, setStreaming]);
 
   const stop = useCallback(() => {
     // Streaming cannot be aborted yet without an AbortController on the
@@ -337,7 +424,7 @@ export function useChat() {
         setError((err as Error).message);
       }
     },
-    [currentSessionId, navigate, qc],
+    [currentSessionId, navigate, qc, setError],
   );
 
   const handleLogout = useCallback(() => {
@@ -349,16 +436,19 @@ export function useChat() {
   return {
     sessions,
     models,
+    projects,
     currentSessionId,
     turns,
     input,
     setInput,
     model,
     setModel,
-    defaultModel,
-    setDefaultModel,
     mode,
     setMode,
+    uiLanguage,
+    setLanguage,
+    project,
+    setProject,
     streaming,
     error,
     health,

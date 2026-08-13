@@ -34,3 +34,5 @@ npm-debug.log*
 
 # Data volumes
 pg_data/
+
+config.yml

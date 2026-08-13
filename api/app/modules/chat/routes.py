@@ -8,8 +8,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from app.core.config import settings
+from app.core.db import session_scope
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
 from app.modules.chat import service
@@ -28,6 +30,7 @@ class ChatRequest(BaseModel):
     content: str
     model: str | None = None
     mode: str | None = None  # 'simple' | 'knowledge' | 'think' — reserved for future agent modes
+    project: str | None = None  # override user_pref default_project for this request
 
 
 def _session_dict(cs: ChatSession) -> dict:
@@ -69,6 +72,26 @@ async def get_models(current: Annotated[User, Depends(get_current_user)]) -> lis
     if not models:
         models.append({"provider": "openlike", "model": "MiniMax-M3"})
     return models
+
+
+@router.get("/projects")
+async def list_graph_projects(
+    current: Annotated[User, Depends(get_current_user)],
+) -> list[str]:
+    """Distinct project names available in `library_coderag.graph_folders`.
+
+    These populate the project dropdown in ChatInput. The user picks one
+    per session; the choice is persisted in `user_preferences.default_project`
+    and used to bind the `:project` placeholder in tool queries.
+    """
+    async with session_scope() as session:
+        result = await session.execute(
+            text(
+                f"SELECT DISTINCT project FROM {settings.graph_schema}.graph_folders "
+                "ORDER BY project"
+            )
+        )
+        return [row[0] for row in result.fetchall() if row[0]]
 
 
 @router.get("/connectivity")
@@ -142,6 +165,7 @@ async def send_message(
             user_content=payload.content,
             model=payload.model,
             mode=payload.mode,
+            project=payload.project,
         ):
             # First iteration is_last=True carries the resolved mode; log it.
             if is_last and meta.get("effective_mode"):
@@ -159,6 +183,8 @@ async def send_message(
                 "error": chunk.error,
                 "tokens_in": chunk.tokens_in,
                 "tokens_out": chunk.tokens_out,
+                "tool_call": chunk.tool_call,
+                "tool_result": chunk.tool_result,
             }
             yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 

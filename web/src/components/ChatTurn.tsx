@@ -1,4 +1,4 @@
-import type { ChatTurn } from '@/api/client';
+import type { ChatTurn, ToolCallEvent, ToolResultEvent } from '@/api/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -25,6 +25,9 @@ export function ChatTurnView({ turn }: Props) {
           {meta.length > 0 && <span className="turn-tokens">{meta.join(' · ')}</span>}
         </div>
         <div className="turn-content">
+          {(turn.tool_calls ?? []).length > 0 && (
+            <ToolTrace calls={turn.tool_calls ?? []} results={turn.tool_results ?? []} />
+          )}
           {turn.assistant_content ? (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -37,10 +40,40 @@ export function ChatTurnView({ turn }: Props) {
               {turn.assistant_content}
             </ReactMarkdown>
           ) : (
-            '…'
+            (turn.tool_calls ?? []).length === 0 && '…'
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+function ToolTrace({
+  calls,
+  results,
+}: {
+  calls: ToolCallEvent[];
+  results: ToolResultEvent[];
+}) {
+  return (
+    <details className="tool-trace">
+      <summary>
+        🔧 {calls.length} tool {calls.length === 1 ? 'call' : 'calls'}
+      </summary>
+      <ol className="tool-list">
+        {calls.map((c) => {
+          const r = results.find((rr) => rr.tool_call_id === c.id);
+          return (
+            <li key={c.id}>
+              <div className="tool-name">{c.name}</div>
+              <pre className="tool-args">{JSON.stringify(c.arguments, null, 2)}</pre>
+              {r && (
+                <pre className="tool-result">{r.result}</pre>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </details>
   );
 }

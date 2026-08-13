@@ -18,18 +18,24 @@ logger = logging.getLogger(__name__)
 @tool(
     name="project_whole_index_retriever",
     description=(
-        "Get the project folder node list.\n"
-        "Required parameter `project`: the currently selected solution name.\n"
+        "Get the folder node list for the project named `project`.\n"
+        "Required parameter: `project` (the solution name). The agent's "
+        "instructions tell you the current project — pass it verbatim.\n"
         "Use when the user asks about project structure / directory tree / all folders.\n"
-        "Returns folder nodes:\n"
+        "Output format (via the `format` parameter):\n"
         "  format='flat' (default, recommended): NDJSON one node per line, "
         "fields = id|name|total_files|path. Saves 50%+ tokens vs tree form.\n"
         "  format='tree': nested dict form, only when parent-child hierarchy "
         "is strictly required.\n"
-        "Selection rule: default flat; only use tree when the question "
-        "explicitly depends on parent-child hierarchy.\n"
-        "Avoid repeated calls — the result is cached for 30 min."
+        "Selection rule: default flat; only use tree when the question explicitly "
+        "depends on parent-child hierarchy.\n"
+        "Result is cached for 30 min per (project, format) pair — the cache "
+        "key includes `project`, so different projects do not collide."
     ),
+    # The cache key is `(project, format)` — different projects get separate
+    # cache entries. Disable caching only if `project` is left empty (the
+    # LLM didn't follow instructions), in which case we fall back to
+    # session_state and skip the cache.
     cache_results=True,
     cache_ttl=1800,
 )
@@ -38,11 +44,24 @@ async def project_whole_index_retriever(
     project: str = "",
     format: str = "flat",
 ) -> str:
-    """Return the project's folder tree (NDJSON flat by default)."""
+    """Return the project's folder tree (NDJSON flat by default).
+
+    The `project` argument is part of the function signature (and thus part
+    of the JSON schema the model sees) because the tool's cache key
+    includes it. The agent's instructions pass the active project name
+    in this slot so different projects get isolated cache entries.
+
+    Defensive fallback: if the model leaves `project` empty (it didn't
+    follow the instruction), we read it from session_state — but cache
+    is effectively disabled in that case since the key collapses to
+    `project=""`.
+    """
     try:
         if not project:
+            project = (run_context.session_state or {}).get("project", "")
+        if not project:
             return check_and_truncate_output(
-                {"error": "project parameter is required."}
+                {"error": "no project selected. Pick a project from the chat input bar."}
             )
 
         logger.info(f"project_whole_index_retriever: project={project}")

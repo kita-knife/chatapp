@@ -1,8 +1,9 @@
 # ChatApp-PG
 
 Self-hosted AI platform: chat sessions with multi-provider LLM streaming,
-per-user preferences, three agent modes (`simple` / `knowledge` / `think`),
-and per-session turn rows in Postgres.
+tool-calling against a `library_coderag` Postgres schema, three agent
+modes (`simple` / `knowledge` / `think`), per-user preferences, and
+per-session turn rows in Postgres.
 
 Built for a single-tenant self-hosted deployment with Dockerfiles for
 [Railway](https://railway.app), but runs anywhere that has Python 3.12+ and
@@ -16,17 +17,26 @@ Node 22+.
   (`user_content` + `assistant_content` + status + token counts).
 - **Multi-provider LLM** routed by model prefix (OpenAI-compatible
   endpoints out of the box, plus Anthropic / Ollama hooks).
-- **Three agent modes**:
-  - `simple` — direct LLM call
-  - `knowledge` — augments the system prompt with retrieved context
-    (RAG source is a pluggable hook; default returns `[]`)
-  - `think` — Chinese CoT prompt + higher `max_tokens`
+- **Three agent modes** (each its own `Agent` instance):
+  - `simple` — direct LLM call, no tools
+  - `knowledge` — all 6 graph tools + RAG-style system prompt
+  - `think` — CoT prompt + higher `max_tokens=4096`
+- **Tool calling** against `library_coderag` (`graph_documents`,
+  `graph_folders`, `graph_contain_edges`, `graph_invoke_edges`):
+  `execute_sql`, `get_db_schema`, `graphdb_retrievedby_keywords`,
+  `graphdb_retrieve_relationships`, `project_whole_index_retriever`,
+  `project_partial_index_retriever`. Tool calls and results stream to
+  the UI as SSE events and render as collapsible blocks in `ChatTurn`.
 - **Per-user preferences** persisted in `user_preferences` (JSONB blob) and
-  merged on every request (`default_mode`, `default_model`, `ui_language`).
+  merged on every request (`default_mode`, `default_model`,
+  `default_project`, `ui_language`).
 - **Title auto-generation**: immediate fallback (truncated user message)
   on first turn + background LLM refinement after the stream finishes.
 - **Externalized prompts**: all user-facing prompts live in
   `api/app/core/prompts.yml`; no prompt is hard-coded in code.
+- **YAML config** (`api/config.yml`) — single source of truth; falls back to
+  `config.example.yml` shape. Override path via `CONFIG_PATH`. PaaS env
+  var `DATABASE_URL` takes priority over the YAML's database block.
 - **Auth + RBAC**: cookie-session login, three roles (`root` / `admin` /
   `user`), role-scoped endpoints, root can create additional admins/users.
 - **Thinking-block filter**: server-side `<think>...</think>` is
@@ -38,7 +48,8 @@ Node 22+.
 | Layer | Tech |
 |---|---|
 | Backend | Python 3.12+, FastAPI, SQLAlchemy 2 (async), `uv` package manager |
-| LLM abstraction | [agno](https://github.com/agno-agi/agno) for provider factory + resolution; OpenAI client directly for streaming (so we can capture `usage` tokens) |
+| LLM abstraction | [agno](https://github.com/agno-agi/agno) `Agent` + `Model` — provider factory, streaming, tool-call loop, token accounting |
+| Config | YAML (`PyYAML` + `pydantic-settings`) — see [`api/config.example.yml`](api/config.example.yml) |
 | Frontend | Vite 6, React 18, TypeScript, TanStack Query, React Router 7 |
 | Database | PostgreSQL 16+ (uses `pgvector` later) |
 | SSE | FastAPI `StreamingResponse` with `text/event-stream` |
@@ -50,13 +61,16 @@ Node 22+.
 chatapp-pg/
 ├── api/
 │   ├── app/
-│   │   ├── core/                  # config (YAML loader), db, security, prompts.yml, prompts.py
+│   │   ├── core/                  # YAML config loader, db, security, prompts.yml, prompts.py
 │   │   ├── api/router.py          # /api/* mount
 │   │   ├── cli/                   # `python -m app.cli` (create-root)
 │   │   └── modules/
 │   │       ├── auth/             # users, auth_sessions, login/me/logout
 │   │       │   └── users/         # root-only user CRUD
 │   │       ├── chat/             # sessions, messages (turns), providers
+│   │       │   ├── agents/        # simple / knowledge / think Agent factories
+│   │       │   ├── tools/        # 6 library_coderag tools (@tool-decorated)
+│   │       │   └── utils.py      # check_and_truncate_output
 │   │       └── users_prefs/      # preferences table + endpoints
 │   ├── config.example.yml         # template — copy to config.yml
 │   ├── Dockerfile                # Python 3.12-slim + uv + libpq
@@ -67,10 +81,10 @@ chatapp-pg/
 │   │   ├── api/client.ts          # fetch wrapper, all API methods
 │   │   ├── app/                   # router, AppShell
 │   │   ├── auth/                  # login page, useAuth hook
-│   │   ├── chat/                  # ChatPage
-│   │   ├── rag/ mcp/ settings/    # placeholder pages (future)
+│   │   ├── chat/                  # ChatPage (4-dropdowns: lang/mode/model/project)
+│   │   ├── rag/ mcp/ settings/    # placeholder pages (future; Settings is reserved)
 │   │   ├── admin/                 # AdminUsersPage (root only)
-│   │   ├── components/            # ChatInput, ChatTurn, SessionList
+│   │   ├── components/            # ChatInput, ChatTurn (renders tool trace), SessionList
 │   │   ├── hooks/useChat.ts       # main chat state + actions
 │   │   └── styles/global.css
 │   ├── Dockerfile                # Node 22 multi-stage + serve
@@ -110,6 +124,17 @@ user_preferences (PK user_id FK users(id) ON DELETE CASCADE)
   updated_at
 ```
 
+`user_preferences.preferences` is a JSONB blob with these keys (all
+optional; defaults are filled in by `users_prefs.service.get_preferences`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `default_mode` | `"simple"` | `simple` \| `knowledge` \| `think` |
+| `default_model` | _(None)_ | Resolved to `settings.openlike_model` at read time |
+| `default_project` | `""` | Library_coderag project name; empty disables Send |
+| `ui_language` | `"zh"` | `"zh"` \| `"en"` |
+| `system_prompt_overrides` | `{think: None, knowledge: None}` | Per-mode prompt overrides |
+
 Schema is managed by Alembic under `api/migrations/`. All tables (plus
 `alembic_version`) live in the **`ai` PostgreSQL schema**, not `public`.
 Run `alembic upgrade head` from `api/` before the first start, and again
@@ -141,18 +166,40 @@ Each request resolves an **effective mode** using this priority:
 2. `user_preferences.default_mode` (server-side, persisted per user)
 3. `simple` (fallback)
 
-When the effective mode is set, the backend injects an extra system
-message built from `prompts.yml`:
+Each mode maps to a distinct `Agent` instance built from
+[`api/app/modules/chat/agents/`](api/app/modules/chat/agents):
 
-- `simple` — no extra system prompt
-- `knowledge` — prefix + suffix wrapping any RAG chunks (currently the
-  `rag.retrieve()` hook returns `[]`, so the prompt is essentially a no-op
-  until a RAG source is wired up)
-- `think` — Chinese CoT instruction + `max_tokens=4096`
+| Mode | Agent file | Tools | `max_tokens` | Notes |
+|---|---|---|---|---|
+| `simple` | `simple.py` | none | default | Direct chat, no project hint |
+| `knowledge` | `knowledge.py` | all 6 graph tools | default | RAG-style prompt prefix/suffix from `prompts.yml` |
+| `think` | `think.py` | all 6 graph tools | `4096` | CoT prompt + larger token budget |
+
+The active project name (from `user_preferences.default_project`) is
+injected into the knowledge / think agent's instructions so the LLM
+knows what to pass to tools that have a `project` parameter (notably
+`project_whole_index_retriever`, whose cache key includes `project`).
 
 `<think>...</think>` blocks emitted by the model are stripped from the
 SSE chunks **and** from the persisted `assistant_content`, so reloads
 don't show them either.
+
+### Tool calling
+
+When the user has selected a project and the active mode is
+`knowledge` / `think`, the model can call any of the six tools in
+[`api/app/modules/chat/tools/`](api/app/modules/chat/tools). All tools
+read their project binding from `RunContext.session_state["project"]`
+which the agent populates from the current request — except
+`project_whole_index_retriever`, which expects the LLM to pass
+`project` as a function argument so its result cache is keyed per
+project. The active project is also surfaced via instructions so the
+LLM knows the value.
+
+Each tool emits two SSE events back to the UI: `tool_call` (the call
+the model is making) and `tool_result` (the response). `ChatTurn`
+renders them as a collapsible `🔧 N tool calls` block above the
+assistant reply.
 
 ## API surface
 
@@ -181,21 +228,36 @@ All endpoints are under `/api`.
 |---|---|---|---|
 | `GET` | `/api/health` | public | liveness |
 | `GET` | `/api/chat/models` | login | UI picker |
+| `GET` | `/api/chat/projects` | login | distinct project names from `library_coderag.graph_folders` (populates the project dropdown) |
 | `GET` | `/api/chat/connectivity` | login | pre-flight probe (`?model=...`) |
 | `POST` | `/api/chat/sessions` | login | create session, `owner_id = current_user` |
 | `GET` | `/api/chat/sessions` | login | list own sessions |
 | `GET` | `/api/chat/sessions/{id}` | login | owner only |
 | `DELETE` | `/api/chat/sessions/{id}` | login | owner only |
 | `GET` | `/api/chat/sessions/{id}/messages` | login | list turns |
-| `POST` | `/api/chat/sessions/{id}/messages` | login | **SSE**; body `{content, model?, mode?}` |
+| `POST` | `/api/chat/sessions/{id}/messages` | login | **SSE**; body `{content, model?, mode?, project?}` |
 
 ### SSE event format
 
-```text
-data: {"delta": "你好", "finish_reason": null, "error": null, "tokens_in": 184, "tokens_out": 0}
+Each `data:` line is a JSON object. Field combinations by phase:
 
-data: {"delta": "", "finish_reason": "stop", "error": null, "tokens_in": 184, "tokens_out": 1612}
+```text
+# Content streamed
+data: {"delta": "你好", "finish_reason": null, "error": null, "tokens_in": 184, "tokens_out": 0, "tool_call": null, "tool_result": null}
+
+# Tool call (model decides to call a tool)
+data: {"delta": "", "tool_call": {"id": "call_xyz", "name": "execute_sql", "arguments": {"sql": "SELECT ..."}}, "tool_result": null}
+
+# Tool result (after tool execution)
+data: {"delta": "", "tool_call": null, "tool_result": {"tool_call_id": "call_xyz", "name": "execute_sql", "result": "[{...}]"}}
+
+# Final
+data: {"delta": "", "finish_reason": "stop", "tokens_in": 184, "tokens_out": 1612, "tool_call": null, "tool_result": null}
 ```
+
+The `tool_call` and `tool_result` events drive the collapsible
+`🔧 N tool calls` block in `ChatTurn`. Streaming chunks with
+`finish_reason="error"` carry an `error` string instead of `delta`.
 
 ## Bootstrap from scratch
 
@@ -222,7 +284,7 @@ Pick a name (we use `chatapp` throughout the docs) and a superuser / role
 that can `CREATE` / DDL.
 
 ```bash
-# Local Postgres (defaults match .env.example):
+# Local Postgres (defaults match config.example.yml):
 PGPASSWORD=postgreswsl psql -h localhost -p 5433 -U postgres \
   -c "CREATE DATABASE chatapp;"
 
@@ -247,7 +309,7 @@ app:
   web_base_url: http://localhost:5173   # CORS allow-list (must match the URL the browser opens)
 
 llm:
-  primary:
+  openlike:
     api_base: https://api.minimax.chat/v1
     api_key: sk-...
 
@@ -255,6 +317,11 @@ llm:
 # config.example.yml. Override here only if your Postgres is elsewhere:
 # database:
 #   url: postgresql+asyncpg://user:pass@host:5432/chatapp
+
+# Graph DB schema for tool calling (library_coderag):
+graph:
+  schema: library_coderag
+  default_project: ""   # optional: fallback if user hasn't picked one
 ```
 
 Railway / Heroku / PaaS deployments inject `DATABASE_URL` via the shell
@@ -352,7 +419,7 @@ PGPASSWORD=postgreswsl psql -h localhost -p 5433 -U postgres \
 
 # 2. Backend
 cd api
-cp config.example.yml config.yml   # then edit llm.primary.api_key, web_base_url
+cp config.example.yml config.yml   # then edit llm.openlike.api_key, web_base_url
 uv sync
 uv run alembic upgrade head        # creates ai schema + 5 tables
 uv run python -m app.cli create-root --username root --password 'YOUR_PW'
@@ -413,6 +480,22 @@ YAML `database.url` and `database.postgres.*` blocks.
 The full YAML schema (every field with its default and meaning) is at
 [`api/config.example.yml`](api/config.example.yml).
 
+### Graph DB (`library_coderag`)
+
+The `graph` block configures the schema used by tool-calling agents:
+
+```yaml
+graph:
+  schema: library_coderag   # Postgres schema containing the graph tables
+  default_project: ""       # fallback if user hasn't picked one in the UI
+```
+
+The schema must contain the four graph tables: `graph_folders`,
+`graph_documents`, `graph_contain_edges`, `graph_invoke_edges`. Tools
+read the active project name from `RunContext.session_state["project"]`
+(except `project_whole_index_retriever`, which expects it as a function
+argument so its cache key is per-project).
+
 ## Deployment (Railway)
 
 Each subdirectory (`api/`, `web/`) has a self-contained `Dockerfile` and
@@ -452,21 +535,23 @@ services** (postgres + api + web).
      |---|---|
      | `DATABASE_URL` | `{{ postgres.DATABASE_URL }}` |
 
-   - In `config.yml` set, at minimum:
+    - In `config.yml` set, at minimum:
 
-     ```yaml
-     app:
-       web_base_url: https://chatapp-pg-web.up.railway.app   # backfill after step 5
-     llm:
-       primary:
-         api_base: https://api.minimax.chat/v1
-         api_key: sk-...
-         model: MiniMax-M3
-     auth:
-       max_root_users: 4
-       session:
-         cookie_secure: true   # production over HTTPS
-     ```
+      ```yaml
+      app:
+        web_base_url: https://chatapp-pg-web.up.railway.app   # backfill after step 5
+      llm:
+        openlike:
+          api_base: https://api.minimax.chat/v1
+          api_key: sk-...
+          model: MiniMax-M3
+      auth:
+        max_root_users: 4
+        session:
+          cookie_secure: true   # production over HTTPS
+      graph:
+        schema: library_coderag
+      ```
 
 4. **Add the Web service**
    - New → GitHub Repo (same repo)
@@ -510,7 +595,9 @@ public internet.
 | Add another root user (up to `MAX_ROOT_USERS`) | shell into `api` service, run `uv run python -m app.cli create-root --username …` |
 | Promote user → admin | root user → `/admin/users` → re-create with `role: admin` (no in-place promote yet) |
 | Edit a prompt live | edit `api/app/core/prompts.yml`; with `PROMPTS_RELOAD=true` no restart needed, otherwise redeploy `api` |
-| Stream JSON inspection | `curl -N -b cookies.txt http://localhost:8000/api/chat/sessions/{id}/messages -d '{"content":"hi"}' -H 'Content-Type: application/json'` |
+| Pick a project for tool calling | UI → ChatInput → project dropdown (top-right). Persisted in `user_preferences.default_project`. |
+| Stream JSON inspection (with tool events) | `curl -N -b cookies.txt http://localhost:8000/api/chat/sessions/{id}/messages -d '{"content":"hi","project":"LICSXP_VER11.0"}' -H 'Content-Type: application/json'` |
+| List available projects | `curl -b cookies.txt http://localhost:8000/api/chat/projects` |
 
 ## Troubleshooting
 
@@ -527,11 +614,27 @@ Fixed in the latest code (see `useAuth.ts → useLogin.onSuccess`). Make sure
 your web bundle includes the fix (rebuild the web service / repull the
 image). If the symptom reappears, check that no stale build is being served.
 
-**"I get `alembic_version` does not exist" or other migration errors.**
+**"I get `alembic_version` does not exist" or other migration errors."**
 
 The DB was created by the previous auto-create-all path. Run `uv run alembic
 stamp head` to mark it as up-to-date without re-running DDL, then continue
 normal `alembic upgrade head` from then on.
+
+**"Tools don't run — model just responds with text."**
+
+Make sure the user has selected a project in the ChatInput dropdown (top-right,
+next to the mode dropdown). Without a project, the Send button is disabled
+and tools can't bind `:project`. Also check that `graph.schema` in
+`config.yml` points to a schema containing the four graph tables.
+
+**"Tool results look like they're from the wrong project."**
+
+`project_whole_index_retriever` caches results per `(project, format)` pair.
+If the LLM doesn't pass `project` in its tool call, the cache key collapses
+to `project=""` and may return stale results. The agent's instructions
+include "Current project: 'X'. When calling project_whole_index_retriever,
+always pass project='X'" — if the model ignores this, the cache may be
+polluted. Clear the cache by restarting the API process.
 
 ## Iteration roadmap
 
@@ -539,9 +642,14 @@ normal `alembic upgrade head` from then on.
 |---|---|---|
 | 1 | Backend + Web skeleton, multi-provider LLM, SSE, Postgres for chat history | ✅ |
 | 2 | Auth (session cookie + `create-root` CLI + role-based access) | ✅ |
-| 3 | Per-user preferences (`user_preferences` JSONB), settings page | ✅ |
-| 4 | Agent modes (simple / knowledge / think), prompt-loader-backed system prompts | ✅ |
-| 5 | RAG (Git/Local + pgvector) | pending |
+| 3 | Per-user preferences (`user_preferences` JSONB), settings page (reserved, empty) | ✅ |
+| 4 | Agent modes (simple / knowledge / think) as separate Agent instances | ✅ |
+| 5 | Tool calling against `library_coderag` (6 graph tools, project-aware, SSE tool events) | ✅ |
+| 6 | YAML config (`config.yml`) with `DATABASE_URL` env override | ✅ |
+| 7 | RAG (Git/Local + pgvector) | pending |
+| 8 | MCP Client + default GitHub / Filesystem / Fetch | pending |
+| 9 | Sandbox (Docker SDK isolation) | pending |
+| 10 | Background workers (Redis + Arq) | pending |
 | 6 | MCP Client + default GitHub / Filesystem / Fetch | pending |
 | 7 | Sandbox (Docker SDK isolation) | pending |
 | 8 | Background workers (Redis + Arq) | pending |

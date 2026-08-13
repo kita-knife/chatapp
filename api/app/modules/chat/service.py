@@ -15,7 +15,7 @@ from app.modules.chat.providers import (
     ChatChunk,
     complete_once,
     resolve_provider_for_model,
-    stream_chat,
+    stream_chat_agent,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,19 +47,10 @@ StreamItem = Tuple[ChatChunk, bool, dict[str, Any]]
 
 AUTO_TITLE_ON_FIRST_MESSAGE = True
 
-# Tools exposed to the model during chat. These names must match the keys
-# in `app.modules.chat.tools.TOOL_REGISTRY`. To disable a tool, remove it
-# from this list. To enable a new tool, register it in `TOOL_REGISTRY` and
-# add the name here.
-ENABLED_TOOLS: list[str] = [
-    "execute_sql",
-    "get_db_schema",
-    "graphdb_retrieve_relationships",
-    "graphdb_retrievedby_keywords",
-    "project_partial_index_retriever",
-    "project_whole_index_retriever",
-]
-
+# Tools are configured per Agent (see `app.modules.chat.agents.*`).
+# Each mode's agent decides which tools to attach and which instructions
+# to use. The simple agent has no tools; knowledge and think attach all
+# six graph tools.
 
 # ---------------- sessions (owner-scoped) ----------------
 
@@ -226,9 +217,8 @@ async def stream_chat_response(
     tokens_in = 0
     tokens_out = 0
     final_reason: str | None = "stop"
-    async for chunk in stream_chat(
+    async for chunk in stream_chat_agent(
         provider_name, history, used_model, mode=effective_mode, project=project,
-        tools=ENABLED_TOOLS,
     ):
         if chunk.delta:
             full_text_parts.append(chunk.delta)

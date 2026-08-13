@@ -11,7 +11,7 @@ These four commands take you from "PostgreSQL exists, code is cloned" to
 # 1. Install Python deps (creates .venv/)
 uv sync
 
-# 2. Configure the app (then edit llm.primary.api_key, web_base_url, etc.)
+# 2. Configure the app (then edit llm.openlike.api_key, web_base_url, etc.)
 cp config.example.yml config.yml
 
 # 3. Create the Postgres database (once per machine — pick your own name)
@@ -111,20 +111,52 @@ uv run alembic stamp head
 |---|---|---|
 | `GET` | `/api/health` | Health |
 | `GET` | `/api/chat/models` | Models available in the UI |
+| `GET` | `/api/chat/projects` | Distinct project names from `library_coderag.graph_folders` |
+| `GET` | `/api/chat/connectivity` | Pre-flight probe (`?model=...`) |
 | `POST` | `/api/chat/sessions` | Create session |
 | `GET` | `/api/chat/sessions` | List sessions |
 | `GET` | `/api/chat/sessions/{id}` | Get one session |
 | `DELETE` | `/api/chat/sessions/{id}` | Delete session |
 | `GET` | `/api/chat/sessions/{id}/messages` | List messages |
-| `POST` | `/api/chat/sessions/{id}/messages` | Send a message — **response is SSE** |
+| `POST` | `/api/chat/sessions/{id}/messages` | Send a message — **response is SSE**; body `{content, model?, mode?, project?}` |
 
 ### SSE event format
 
-```text
-data: {"delta": "你好", "finish_reason": null, "error": null}
+Each `data:` line is a JSON object. Field combinations by phase:
 
-data: {"delta": "", "finish_reason": "stop", "error": null}
+```text
+# Content streamed
+data: {"delta": "你好", "finish_reason": null, "error": null, "tokens_in": 184, "tokens_out": 0, "tool_call": null, "tool_result": null}
+
+# Tool call (model decides to call a tool)
+data: {"delta": "", "tool_call": {"id": "call_xyz", "name": "execute_sql", "arguments": {"sql": "SELECT ..."}}, "tool_result": null}
+
+# Tool result (after tool execution)
+data: {"delta": "", "tool_call": null, "tool_result": {"tool_call_id": "call_xyz", "name": "execute_sql", "result": "[{...}]"}}
+
+# Final
+data: {"delta": "", "finish_reason": "stop", "tokens_in": 184, "tokens_out": 1612, "tool_call": null, "tool_result": null}
 ```
+
+## Tool calling
+
+Six tools under `app/modules/chat/tools/` are registered in
+`TOOL_REGISTRY` and attached to the `knowledge` / `think` agents:
+
+| Tool | Reads from |
+|---|---|
+| `execute_sql` | Read-only SELECT/WITH on `settings.graph_schema`; requires `:project` placeholder |
+| `get_db_schema` | `information_schema.columns` for `settings.graph_schema` |
+| `graphdb_retrievedby_keywords` | `graph_folders` + `graph_documents` name/content ILIKE search |
+| `graphdb_retrieve_relationships` | contain/invoke edges of a node id |
+| `project_partial_index_retriever` | Recursive descendants of a folder id |
+| `project_whole_index_retriever` | Full folder tree; expects `project` as an explicit argument (cache key includes it) |
+
+All tools read the active project from `RunContext.session_state["project"]`,
+which the agent populates per request. `project_whole_index_retriever` is
+the exception — its cache (`cache_results=True, cache_ttl=1800`) is keyed
+by `(project, format)`, so the LLM must pass `project` explicitly; the
+agent's instructions contain a hint telling it to do so.
 
 ## Provider routing
 
@@ -139,6 +171,22 @@ agno is used as the provider layer. The provider is selected by model prefix:
 
 If the model doesn't match any prefix, the request falls back to the configured openlike endpoint.
 
+## Agent modes
+
+Three `Agent` factories in `app/modules/chat/agents/`:
+
+| Mode | File | Tools | `max_tokens` | Notes |
+|---|---|---|---|---|
+| `simple` | `simple.py` | none | default | Direct chat, no project hint |
+| `knowledge` | `knowledge.py` | all 6 graph tools | default | RAG-style prompt prefix/suffix from `prompts.yml` |
+| `think` | `think.py` | all 6 graph tools | `4096` | CoT prompt + larger token budget |
+
+The effective mode per request: request body `mode` > `user_preferences.default_mode` > `simple`.
+
+The active project name is injected into the knowledge / think agent's
+instructions so the LLM knows what to pass to tools that take a `project`
+argument.
+
 ## Config
 
 All configuration lives in `config.yml` (template at `config.example.yml`).
@@ -148,6 +196,14 @@ You can override its path with the `CONFIG_PATH` environment variable.
 Only `DATABASE_URL` is also read from the shell environment; Railway /
 Heroku / PaaS providers inject it on linked services and the loader gives
 it priority over the YAML `database.url` / `database.postgres.*` block.
+
+The `graph` block configures tool calling:
+
+```yaml
+graph:
+  schema: library_coderag   # Postgres schema containing the graph tables
+  default_project: ""       # fallback if user hasn't picked one in the UI
+```
 
 The full annotated template is at [`api/config.example.yml`](config.example.yml).
 
@@ -167,7 +223,10 @@ api/
 │           ├── models.py       # ChatSession, ChatMessage
 │           ├── routes.py       # /api/chat/*
 │           ├── service.py      # History + dispatch
-│           └── providers.py    # agno provider layer
+│           ├── providers.py    # agno provider layer + agent factory
+│           ├── utils.py        # check_and_truncate_output
+│           ├── agents/         # simple.py / knowledge.py / think.py (Agent factories)
+│           └── tools/          # 6 library_coderag tools (@tool-decorated)
 ├── config.example.yml          # template — copy to config.yml
 ├── pyproject.toml
 └── config.yml                  # gitignored, your local copy

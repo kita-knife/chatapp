@@ -78,6 +78,7 @@ async def execute_sql(
             return check_and_truncate_output({"error": "sql must not be empty"})
 
         project = (run_context.session_state or {}).get("project", "")
+        print(f"Executing SQL for project: {project}")
         if not project:
             return check_and_truncate_output(
                 {"error": "no project selected. Pick a project from the chat input bar."}

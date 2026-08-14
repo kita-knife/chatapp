@@ -71,23 +71,52 @@ class DatabaseCfg(BaseModel):
 class OpenlikeCfg(BaseModel):
     api_base: str = "https://api.minimax.chat/v1"
     api_key: str = ""
-    model: str = "MiniMax-M3"
+    models: list[str] = Field(default_factory=lambda: ["MiniMax-M3"])
 
 
 class OpenAiCfg(BaseModel):
     api_key: str = ""
     base_url: str = ""
-    default_model: str = "gpt-4o-mini"
+    models: list[str] = Field(default_factory=lambda: ["gpt-4o-mini"])
 
 
 class AnthropicCfg(BaseModel):
     api_key: str = ""
-    default_model: str = "claude-3-5-sonnet-latest"
+    # Empty → official api.anthropic.com. Can point at Anthropic-compatible
+    # endpoints, e.g. "https://dashscope.aliyuncs.com/apps/anthropic" for
+    # Aliyun's dashscope (serves qwen models through the Claude API shape).
+    base_url: str = ""
+    models: list[str] = Field(default_factory=lambda: ["claude-3-5-sonnet-latest"])
 
 
 class OllamaCfg(BaseModel):
     base_url: str = "http://localhost:11434"
-    default_model: str = "llama3.2"
+    models: list[str] = Field(default_factory=lambda: ["llama3.2"])
+
+
+class OpenAiCompatCfg(BaseModel):
+    """Any OpenAI-compatible endpoint (separate slot from the official
+    OpenAI provider). e.g. dashscope's OpenAI-compatible API for qwen.
+
+    When `api_key` is empty the whole provider is hidden from the UI
+    (see routes.get_models).
+    """
+
+    api_key: str = ""
+    base_url: str = ""
+    models: list[str] = Field(default_factory=list)
+
+
+class AnthropicCompatCfg(BaseModel):
+    """Any Anthropic-compatible endpoint (separate slot from the official
+    Anthropic provider). e.g. dashscope's `/apps/anthropic` endpoint.
+
+    When `api_key` is empty the whole provider is hidden from the UI.
+    """
+
+    api_key: str = ""
+    base_url: str = ""
+    models: list[str] = Field(default_factory=list)
 
 
 class LlmCfg(BaseModel):
@@ -95,6 +124,8 @@ class LlmCfg(BaseModel):
     openai: OpenAiCfg = Field(default_factory=OpenAiCfg)
     anthropic: AnthropicCfg = Field(default_factory=AnthropicCfg)
     ollama: OllamaCfg = Field(default_factory=OllamaCfg)
+    openai_compat: OpenAiCompatCfg = Field(default_factory=OpenAiCompatCfg)
+    anthropic_compat: AnthropicCompatCfg = Field(default_factory=AnthropicCompatCfg)
 
 
 class SessionCfg(BaseModel):
@@ -174,20 +205,34 @@ class Settings(BaseSettings):
     graph_schema: str = "library_coderag"
     graph_default_project: str = ""
 
+    # ---------- Primary LLM endpoint (OpenAI-compatible, default) ----------
+    openlike_api_base: str = "https://api.minimax.chat/v1"
+    openlike_api_key: str = ""
+
     # ---------- Optional second endpoints (OpenAI / Anthropic / Ollama) ----------
     openai_api_key: str = ""
     openai_base_url: str = ""
     anthropic_api_key: str = ""
+    anthropic_base_url: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
-    # ---------- Primary LLM endpoint (OpenAI-compatible) ----------
-    openlike_api_base: str = "https://api.minimax.chat/v1"
-    openlike_api_key: str = ""
-    openlike_model: str = "MiniMax-M3"
+    # ---------- Compat endpoints (separate provider slots) ----------
+    openai_compat_api_key: str = ""
+    openai_compat_base_url: str = ""
+    anthropic_compat_api_key: str = ""
+    anthropic_compat_base_url: str = ""
 
-    openai_default_model: str = "gpt-4o-mini"
-    anthropic_default_model: str = "claude-3-5-sonnet-latest"
-    ollama_default_model: str = "llama3.2"
+    # ---------- Per-provider model lists (first entry = default) ----------
+    # Each provider exposes one or more model identifiers. The frontend
+    # dropdown shows all of them under the matching provider label; the
+    # first entry is the implicit default when the user has not picked
+    # one explicitly. An empty list hides the provider from the UI.
+    openlike_models: list[str] = Field(default_factory=lambda: ["MiniMax-M3"])
+    openai_models: list[str] = Field(default_factory=lambda: ["gpt-4o-mini"])
+    anthropic_models: list[str] = Field(default_factory=lambda: ["claude-3-5-sonnet-latest"])
+    ollama_models: list[str] = Field(default_factory=lambda: ["llama3.2"])
+    openai_compat_models: list[str] = Field(default_factory=list)
+    anthropic_compat_models: list[str] = Field(default_factory=list)
 
     # ---------- Database URL override (Railway / Heroku / PaaS) ----------
     # When set (e.g. by Railway's Postgres plugin), this overrides the
@@ -273,13 +318,20 @@ def _flatten(cfg: RootCfg) -> dict[str, object]:
         "openai_api_key": cfg.llm.openai.api_key,
         "openai_base_url": cfg.llm.openai.base_url,
         "anthropic_api_key": cfg.llm.anthropic.api_key,
+        "anthropic_base_url": cfg.llm.anthropic.base_url,
         "ollama_base_url": cfg.llm.ollama.base_url,
         "openlike_api_base": cfg.llm.openlike.api_base,
         "openlike_api_key": cfg.llm.openlike.api_key,
-        "openlike_model": cfg.llm.openlike.model,
-        "openai_default_model": cfg.llm.openai.default_model,
-        "anthropic_default_model": cfg.llm.anthropic.default_model,
-        "ollama_default_model": cfg.llm.ollama.default_model,
+        "openai_compat_api_key": cfg.llm.openai_compat.api_key,
+        "openai_compat_base_url": cfg.llm.openai_compat.base_url,
+        "anthropic_compat_api_key": cfg.llm.anthropic_compat.api_key,
+        "anthropic_compat_base_url": cfg.llm.anthropic_compat.base_url,
+        "openlike_models": list(cfg.llm.openlike.models),
+        "openai_models": list(cfg.llm.openai.models),
+        "anthropic_models": list(cfg.llm.anthropic.models),
+        "ollama_models": list(cfg.llm.ollama.models),
+        "openai_compat_models": list(cfg.llm.openai_compat.models),
+        "anthropic_compat_models": list(cfg.llm.anthropic_compat.models),
     }
 
 

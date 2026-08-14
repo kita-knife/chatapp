@@ -15,8 +15,11 @@ Node 22+.
 
 - **Chat sessions** with SSE streaming; each turn is one row
   (`user_content` + `assistant_content` + status + token counts).
-- **Multi-provider LLM** routed by model prefix (OpenAI-compatible
-  endpoints out of the box, plus Anthropic / Ollama hooks).
+- **Multi-provider LLM** with six configurable provider slots: `openlike`,
+  `openai`, `openai_compat`, `anthropic`, `anthropic_compat`, `ollama`.
+  Each slot has its own `api_key` / `base_url` / `models` list, so you
+  can run official endpoints and OpenAI/Anthropic-compatible endpoints
+  (e.g. dashscope serving qwen) side by side without conflicts.
 - **Three agent modes** (each its own `Agent` instance):
   - `simple` — direct LLM call, no tools
   - `knowledge` — all 6 graph tools + RAG-style system prompt
@@ -130,7 +133,8 @@ optional; defaults are filled in by `users_prefs.service.get_preferences`):
 | Key | Default | Meaning |
 |---|---|---|
 | `default_mode` | `"simple"` | `simple` \| `knowledge` \| `think` |
-| `default_model` | _(None)_ | Resolved to `settings.openlike_model` at read time |
+| `default_model` | _(None)_ | Resolved to the first entry of `settings.openlike_models` at read time |
+| `default_provider` | `"openlike"` | `openlike` \| `openai` \| `openai_compat` \| `anthropic` \| `anthropic_compat` \| `ollama` |
 | `default_project` | `""` | Library_coderag project name; empty disables Send |
 | `ui_language` | `"zh"` | `"zh"` \| `"en"` |
 | `system_prompt_overrides` | `{think: None, knowledge: None}` | Per-mode prompt overrides |
@@ -171,14 +175,15 @@ Each mode maps to a distinct `Agent` instance built from
 
 | Mode | Agent file | Tools | `max_tokens` | Notes |
 |---|---|---|---|---|
-| `simple` | `simple.py` | none | default | Direct chat, no project hint |
+| `simple` | `simple.py` | none | default | Direct chat, friendly role prompt |
 | `knowledge` | `knowledge.py` | all 6 graph tools | default | RAG-style prompt prefix/suffix from `prompts.yml` |
 | `think` | `think.py` | all 6 graph tools | `4096` | CoT prompt + larger token budget |
 
 The active project name (from `user_preferences.default_project`) is
-injected into the knowledge / think agent's instructions so the LLM
-knows what to pass to tools that have a `project` parameter (notably
-`project_whole_index_retriever`, whose cache key includes `project`).
+injected into the system prompt via agno's
+`add_session_state_to_context` so the LLM knows what to pass to tools
+that have a `project` parameter (notably `project_whole_index_retriever`,
+whose cache key includes `project`).
 
 `<think>...</think>` blocks emitted by the model are stripped from the
 SSE chunks **and** from the persisted `assistant_content`, so reloads
@@ -193,8 +198,8 @@ read their project binding from `RunContext.session_state["project"]`
 which the agent populates from the current request — except
 `project_whole_index_retriever`, which expects the LLM to pass
 `project` as a function argument so its result cache is keyed per
-project. The active project is also surfaced via instructions so the
-LLM knows the value.
+project. The active project is surfaced to the LLM via
+`add_session_state_to_context` (embedded in the system message).
 
 Each tool emits two SSE events back to the UI: `tool_call` (the call
 the model is making) and `tool_result` (the response). `ChatTurn`
@@ -312,6 +317,17 @@ llm:
   openlike:
     api_base: https://api.minimax.chat/v1
     api_key: sk-...
+    models: ["MiniMax-M3"]
+
+# Six provider slots are available (each with api_key / base_url / models):
+#   openlike         — OpenAI-compatible endpoint (e.g. MiniMax)
+#   openai           — official OpenAI (base_url empty → api.openai.com)
+#   openai_compat    — any OpenAI-compatible endpoint (e.g. dashscope for qwen)
+#   anthropic        — official Anthropic (base_url empty → api.anthropic.com)
+#   anthropic_compat — any Anthropic-compatible endpoint (e.g. dashscope /apps/anthropic)
+#   ollama           — local Ollama server
+#
+# Compat slots are hidden from the UI when their api_key is empty.
 
 # Database is auto-resolved from the `database.postgres.*` defaults in
 # config.example.yml. Override here only if your Postgres is elsewhere:
@@ -480,6 +496,30 @@ YAML `database.url` and `database.postgres.*` blocks.
 The full YAML schema (every field with its default and meaning) is at
 [`api/config.example.yml`](api/config.example.yml).
 
+### LLM providers
+
+Six provider slots, each with `api_key` / `base_url` (or `api_base`) /
+`models` (first entry = default):
+
+| Key | SDK shape | Default endpoint when `base_url` empty | UI visibility |
+|---|---|---|---|
+| `openlike` | OpenAI-compatible | (requires `api_base`) | models list |
+| `openai` | OpenAI | `https://api.openai.com/v1` | models list |
+| `openai_compat` | OpenAI-compatible | `https://api.openai.com/v1` | hidden when `api_key` empty |
+| `anthropic` | Anthropic | `https://api.anthropic.com` | models list |
+| `anthropic_compat` | Anthropic | `https://api.anthropic.com` | hidden when `api_key` empty |
+| `ollama` | Ollama | `http://localhost:11434` | models list |
+
+The compat slots exist so official endpoints and third-party compatible
+endpoints (e.g. dashscope serving qwen through its OpenAI-compatible or
+`/apps/anthropic` APIs) can run side by side without sharing a
+`base_url`. The frontend shows each provider as a separate dropdown
+entry; the model list filters by the selected provider.
+
+`get_models` (the dropdown source) returns `{provider, model}` pairs in
+this order: `openlike`, `openai`, `openai_compat`, `anthropic`,
+`anthropic_compat`, `ollama`.
+
 ### Graph DB (`library_coderag`)
 
 The `graph` block configures the schema used by tool-calling agents:
@@ -544,7 +584,7 @@ services** (postgres + api + web).
         openlike:
           api_base: https://api.minimax.chat/v1
           api_key: sk-...
-          model: MiniMax-M3
+          models: ["MiniMax-M3"]
       auth:
         max_root_users: 4
         session:

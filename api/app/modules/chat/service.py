@@ -14,7 +14,6 @@ from app.modules.chat.models import ChatMessage, ChatSession
 from app.modules.chat.providers import (
     ChatChunk,
     complete_once,
-    resolve_provider_for_model,
     stream_chat_agent,
 )
 
@@ -54,9 +53,15 @@ AUTO_TITLE_ON_FIRST_MESSAGE = True
 
 # ---------------- sessions (owner-scoped) ----------------
 
-async def create_session(owner_id: UUID, title: str, model: str) -> ChatSession:
+async def create_session(owner_id: UUID, title: str, model: str, provider: str) -> ChatSession:
+    """Create a new chat session.
+
+    The `model` column stores `"{provider}:{model}"` so the sidebar can
+    show both pieces without a schema change. Old rows store a bare model
+    name; `routes._session_dict` handles both forms when serialising.
+    """
     async with session_scope() as session:
-        cs = ChatSession(owner_id=owner_id, title=title, model=model)
+        cs = ChatSession(owner_id=owner_id, title=title, model=f"{provider}:{model}")
         session.add(cs)
         await session.flush()
         await session.refresh(cs)
@@ -88,6 +93,17 @@ async def delete_session(owner_id: UUID, session_id: UUID) -> None:
         if cs is None or cs.owner_id != owner_id:
             return
         await session.delete(cs)
+    # Sync-delete the agno-managed session row (conversation history +
+    # session_state live there). Best effort — if agno's table is missing
+    # this fails silently in the agno DB layer.
+    try:
+        from app.core.agno_db import get_agno_db
+
+        await get_agno_db().delete_session(str(session_id))
+    except Exception:
+        logger.warning(
+            "agno session cleanup failed for chat_session=%s", session_id
+        )
 
 
 async def list_messages(owner_id: UUID, session_id: UUID) -> list[ChatMessage]:
@@ -127,6 +143,7 @@ async def stream_chat_response(
     model: str | None = None,
     mode: str | None = None,
     project: str | None = None,
+    provider: str | None = None,
 ) -> AsyncIterator[StreamItem]:
     """Create a single turn row (user_content filled, status=streaming), stream
     the assistant reply into the same row's assistant_content, then mark
@@ -147,9 +164,19 @@ async def stream_chat_response(
         if cs is None or cs.owner_id != owner_id:
             yield (ChatChunk(error="Session not found"), True, {})
             return
-        used_model = model or cs.model
-        if cs.model != used_model:
-            cs.model = used_model
+        # `model` is required by the route; this fallback only guards
+        # direct/internal callers. The stored column is `{provider}:{model}`,
+        # so split it to recover the bare model name.
+        if model is None:
+            stored = cs.model or ""
+            used_model = stored.split(":", 1)[1] if ":" in stored else stored
+        else:
+            used_model = model
+        # Keep the session's stored `{provider}:{model}` composite in sync
+        # with this request's explicit provider/model (both required).
+        stored_composite = f"{provider}:{used_model}"
+        if cs.model != stored_composite:
+            cs.model = stored_composite
         turn = ChatMessage(
             session_id=session_id,
             user_content=user_content,
@@ -161,9 +188,6 @@ async def stream_chat_response(
         await session.refresh(turn)
         turn_id = turn.id
         prior_count = await count_turns(session_id, session) - 1  # we just inserted one
-        # Build the history (excluding the current turn) PLUS the current user message.
-        history = await _load_history_for_turn(session, session_id, turn_id)
-        history.append({"role": "user", "content": user_content})
         if prior_count == 0 and cs.title in ("", "New chat"):
             # Immediate fallback title (no LLM call) so the sidebar reflects
             # the topic immediately, even before the LLM stream finishes.
@@ -199,7 +223,14 @@ async def stream_chat_response(
             project = prefs.get("default_project") or ""
 
     # Step 2: stream — update the row in place between chunks.
-    provider_name = resolve_provider_for_model(used_model)
+    # `provider` is now required and was sent by the frontend; the dropdown
+    # is the authoritative source for which provider a model came from.
+    if not provider:
+        raise ValueError(
+            "stream_chat_response called without provider — "
+            "this is a programmer error; ChatRequest.provider is required."
+        )
+    provider_name = provider
 
     # Kick off the LLM title-refinement task in parallel with the main stream
     # below. The task opens its own DB session and writes the refined title
@@ -218,7 +249,13 @@ async def stream_chat_response(
     tokens_out = 0
     final_reason: str | None = "stop"
     async for chunk in stream_chat_agent(
-        provider_name, history, used_model, mode=effective_mode, project=project,
+        provider_name,
+        user_content,
+        used_model,
+        mode=effective_mode,
+        project=project,
+        session_id=str(session_id),
+        user_id=str(owner_id),
     ):
         if chunk.delta:
             full_text_parts.append(chunk.delta)
@@ -250,27 +287,6 @@ async def stream_chat_response(
         )
         if chunk.finish_reason == "error":
             return
-
-
-async def _load_history_for_turn(
-    session, session_id: UUID, current_turn_id: UUID
-) -> list[dict[str, str]]:
-    """Load full history *without* the current turn's user_content (caller
-    already has it). The current turn's assistant_content, when streaming,
-    is empty. Stored content is returned verbatim — no filtering.
-    """
-    result = await session.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session_id)
-        .where(ChatMessage.id != current_turn_id)
-        .order_by(ChatMessage.created_at.asc())
-    )
-    history: list[dict[str, str]] = []
-    for m in result.scalars().all():
-        history.append({"role": "user", "content": m.user_content})
-        if m.assistant_content:
-            history.append({"role": "assistant", "content": m.assistant_content})
-    return history
 
 
 # ---------------- auto-title ----------------

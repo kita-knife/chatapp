@@ -16,28 +16,41 @@ from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User
 from app.modules.chat import service
 from app.modules.chat.models import ChatMessage, ChatSession
-from app.modules.chat.providers import check_connectivity, resolve_provider_for_model
+from app.modules.chat.providers import check_connectivity
 
 router = APIRouter()
 
 
 class CreateSessionRequest(BaseModel):
     title: str | None = None
-    model: str | None = None
+    model: str
+    provider: str  # one of: "openlike" | "openai" | "openai_compat" | "anthropic" | "anthropic_compat" | "ollama"
 
 
 class ChatRequest(BaseModel):
     content: str
-    model: str | None = None
+    model: str
     mode: str | None = None  # 'simple' | 'knowledge' | 'think' — reserved for future agent modes
     project: str | None = None  # override user_pref default_project for this request
+    provider: str  # one of: "openlike" | "openai" | "openai_compat" | "anthropic" | "anthropic_compat" | "ollama" — REQUIRED (no fallback)
 
 
 def _session_dict(cs: ChatSession) -> dict:
+    # The stored column is `"{provider}:{model}"` for rows created after
+    # the provider split; old rows hold a bare model name. Split on the
+    # FIRST colon so model names containing ":" (e.g. ollama tags) stay
+    # intact. Old rows → provider is None, frontend falls back to
+    # displaying the model name only.
+    stored = cs.model or ""
+    if ":" in stored:
+        provider, model = stored.split(":", 1)
+    else:
+        provider, model = None, stored
     return {
         "id": str(cs.id),
         "title": cs.title,
-        "model": cs.model,
+        "model": model,
+        "provider": provider,
         "owner_id": str(cs.owner_id) if cs.owner_id else None,
         "created_at": cs.created_at.isoformat(),
         "updated_at": cs.updated_at.isoformat(),
@@ -60,15 +73,29 @@ def _turn_dict(m: ChatMessage) -> dict:
 
 @router.get("/models")
 async def get_models(current: Annotated[User, Depends(get_current_user)]) -> list[dict]:
+    """Expand each provider's `models` list into `{provider, model}` pairs.
+
+    Order: openlike, openai, openai_compat, anthropic, anthropic_compat,
+    ollama (matches the UI dropdown order). Providers with empty `models`
+    are skipped entirely; the two compat providers are additionally hidden
+    when their `api_key` is empty (an unconfigured compat slot would
+    otherwise show models that route to the wrong endpoint). If every
+    provider is hidden, fall back to a single openlike/MiniMax-M3 entry so
+    the UI always has at least one option.
+    """
     models: list[dict[str, str]] = []
-    if settings.openlike_model:
-        models.append({"provider": "openlike", "model": settings.openlike_model})
-    if settings.openai_default_model:
-        models.append({"provider": "openai", "model": settings.openai_default_model})
-    if settings.ollama_default_model:
-        models.append({"provider": "ollama", "model": settings.ollama_default_model})
-    if settings.anthropic_default_model:
-        models.append({"provider": "anthropic", "model": settings.anthropic_default_model})
+    for provider, model_list, required_key in [
+        ("openlike", settings.openlike_models, None),
+        ("openai", settings.openai_models, None),
+        ("openai_compat", settings.openai_compat_models, settings.openai_compat_api_key),
+        ("anthropic", settings.anthropic_models, None),
+        ("anthropic_compat", settings.anthropic_compat_models, settings.anthropic_compat_api_key),
+        ("ollama", settings.ollama_models, None),
+    ]:
+        if required_key is not None and not required_key:
+            continue  # unconfigured compat provider — hide it
+        for m in model_list:
+            models.append({"provider": provider, "model": m})
     if not models:
         models.append({"provider": "openlike", "model": "MiniMax-M3"})
     return models
@@ -96,12 +123,11 @@ async def list_graph_projects(
 
 @router.get("/connectivity")
 async def connectivity(
-    model: str = Query(default=""),
+    provider: str = Query(...),  # one of: "openlike" | "openai" | "openai_compat" | "anthropic" | "anthropic_compat" | "ollama" — REQUIRED
+    model: str = Query(...),    # REQUIRED
     current: Annotated[User, Depends(get_current_user)] = None,  # noqa: B008
 ) -> dict:
-    target = model or settings.openlike_model
-    provider = resolve_provider_for_model(target)
-    return await check_connectivity(provider, target)
+    return await check_connectivity(provider, model)
 
 
 @router.post("/sessions", status_code=201)
@@ -112,7 +138,8 @@ async def create_session(
     cs = await service.create_session(
         owner_id=current.id,
         title=payload.title or "New chat",
-        model=payload.model or settings.openlike_model,
+        model=payload.model,
+        provider=payload.provider,
     )
     return _session_dict(cs)
 
@@ -166,6 +193,7 @@ async def send_message(
             model=payload.model,
             mode=payload.mode,
             project=payload.project,
+            provider=payload.provider,
         ):
             # First iteration is_last=True carries the resolved mode; log it.
             if is_last and meta.get("effective_mode"):

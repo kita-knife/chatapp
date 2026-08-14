@@ -66,7 +66,7 @@ export function SessionList({
             >
               <div className="sidebar-item-title">{s.title}</div>
               <div className="sidebar-item-meta">
-                <span>{s.model}</span>
+                <span>{s.provider ? `${s.provider} / ${s.model}` : s.model}</span>
                 <button
                   className="icon-btn"
                   onClick={(e) => {

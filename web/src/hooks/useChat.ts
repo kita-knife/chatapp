@@ -14,7 +14,7 @@
  * and `useChat` consumers re-render with the new value. This is the only
  * source of truth — there is no parallel local state for these.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -23,6 +23,7 @@ import {
   type ChatTurn,
   type ConnectivityResult,
   type ModelInfo,
+  type ProviderKey,
 } from '@/api/client';
 import { useAuth } from '@/features/auth/useAuth';
 import { useLogout } from '@/features/auth/useAuth';
@@ -71,7 +72,7 @@ export function useChat() {
     enabled: !!auth.user,
     staleTime: 5 * 60_000,
   });
-  const models = modelsQuery.data ?? [];
+  const models = useMemo(() => modelsQuery.data ?? [], [modelsQuery.data]);
 
   // Available graph projects (for the project dropdown). Cached for the
   // session since they only change when the underlying graph_folders table
@@ -85,10 +86,12 @@ export function useChat() {
   const projects = projectsQuery.data ?? [];
 
   // Default selections — single source of truth (server-backed).
-  // `model` is the dropdown's value AND the value send() uses; there is no
-  // separate "current selection" anymore. Backend's `get_preferences()`
-  // resolves null `default_model` to `settings.openlike_model`, so `model`
-  // is always a concrete identifier the dropdown can render.
+  // `provider` + `model` are the dropdown's value AND the values send() uses;
+  // the model dropdown is filtered by the current provider. Backend's
+  // `get_preferences()` resolves null `default_model` to the first entry in
+  // `settings.openlike_models`, so both fields always have concrete values.
+  const provider: ProviderKey =
+    (auth.user?.preferences?.default_provider as ProviderKey | undefined) ?? 'openlike';
   const model = auth.user?.preferences?.default_model ?? '';
   const mode: AgentMode =
     (auth.user?.preferences?.default_mode as AgentMode | undefined) ?? 'simple';
@@ -96,12 +99,23 @@ export function useChat() {
     (auth.user?.preferences?.ui_language as UiLanguage | undefined) ?? 'zh';
   const project = auth.user?.preferences?.default_project ?? '';
 
-  // Connectivity probe — keyed on `model`, so picking a new dropdown
-  // value automatically triggers a refetch against the new model.
+  // Models belonging to the current provider (model dropdown options).
+  const modelsForProvider = models.filter((m) => m.provider === provider);
+  // If the current `model` doesn't belong to the current `provider` (e.g.
+  // prefs were written under a different provider), fall back to the first
+  // model in the provider's list.
+  const activeModel =
+    modelsForProvider.find((m) => m.model === model)?.model ??
+    modelsForProvider[0]?.model ??
+    '';
+
+  // Connectivity probe — keyed on `provider` + `model` so picking a new
+  // model or switching provider triggers a refetch.
   const connectivityQuery = useQuery<ConnectivityResult | null>({
-    queryKey: ['chat', 'connectivity', model || ''],
-    queryFn: () => api.connectivity(model || undefined),
-    enabled: !!auth.user,
+    queryKey: ['chat', 'connectivity', provider, activeModel || ''],
+    queryFn: () =>
+      activeModel ? api.connectivity(provider, activeModel) : Promise.resolve(null),
+    enabled: !!auth.user && !!activeModel,
     staleTime: 30_000,
     retry: false,
   });
@@ -146,19 +160,13 @@ export function useChat() {
   // the `useUpdateMyPreferences` mutation (not the raw `api.updateMyPreferences`)
   // because the mutation's `onSuccess` invalidates the `auth` query —
   // without that, `auth.user.preferences.*` stays stale, the dropdowns
-  // bound to `model` / `mode` / `uiLanguage` won't reflect the new value,
-  // and the connectivity probe (keyed on `model`) won't refetch.
+  // bound to `model` / `mode` / `uiLanguage` / `provider` won't reflect the
+  // new value, and the connectivity probe (keyed on `provider` + `model`)
+  // won't refetch.
   //
   // Mutations are fire-and-forget here; errors land in `updateMyPreferences.error`
   // and surface via the auth guard for 401s. Other failures don't have a
   // dedicated UI surface yet — same trade-off as before.
-
-  const setModel = useCallback(
-    (m: string) => {
-      updateMyPreferences.mutate({ preferences: { default_model: m || null } });
-    },
-    [updateMyPreferences],
-  );
 
   const setMode = useCallback(
     (m: AgentMode) => {
@@ -177,6 +185,31 @@ export function useChat() {
   const setProject = useCallback(
     (p: string) => {
       updateMyPreferences.mutate({ preferences: { default_project: p || null } });
+    },
+    [updateMyPreferences],
+  );
+
+  const setProvider = useCallback(
+    (p: ProviderKey) => {
+      // Switching provider also resets the model to the new provider's
+      // first entry so `default_model` never holds a model from a
+      // different provider. The dropdown and send() both derive from
+      // these two prefs, so this keeps display and send consistent
+      // (and survives a page reload).
+      const firstModel = models.find((m) => m.provider === p)?.model ?? '';
+      updateMyPreferences.mutate({
+        preferences: {
+          default_provider: p,
+          ...(firstModel ? { default_model: firstModel } : {}),
+        },
+      });
+    },
+    [models, updateMyPreferences],
+  );
+
+  const setModel = useCallback(
+    (m: string) => {
+      updateMyPreferences.mutate({ preferences: { default_model: m || null } });
     },
     [updateMyPreferences],
   );
@@ -296,7 +329,7 @@ export function useChat() {
     let sessionId = currentSessionId;
     if (!sessionId) {
       try {
-        const created = await api.createSession(undefined, model || undefined);
+        const created = await api.createSession(null, activeModel, provider);
         sessionId = created.id;
         // Optimistic insert into the shared session cache so the sidebar
         // shows the new session immediately (without waiting for a
@@ -340,7 +373,8 @@ export function useChat() {
       for await (const chunk of api.streamMessage(
         sessionId,
         userContent,
-        model || undefined,
+        provider,
+        activeModel || '',
         mode,
         project || undefined,
       )) {
@@ -401,7 +435,7 @@ export function useChat() {
       streamingRef.current = false;
       setStreaming(false);
     }
-  }, [currentSessionId, input, streaming, model, mode, project, probeConnectivity, navigate, qc, setError, setStreaming]);
+  }, [currentSessionId, input, streaming, provider, activeModel, mode, project, probeConnectivity, navigate, qc, setError, setStreaming]);
 
   const stop = useCallback(() => {
     // Streaming cannot be aborted yet without an AbortController on the
@@ -441,8 +475,11 @@ export function useChat() {
     turns,
     input,
     setInput,
-    model,
+    provider,
+    setProvider,
+    model: activeModel,
     setModel,
+    modelsForProvider,
     mode,
     setMode,
     uiLanguage,

@@ -724,6 +724,7 @@ select {
 
 .chat-input-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: stretch;
 }
@@ -752,17 +753,6 @@ select {
   color: var(--text);
   font-size: 13px;
   outline: none;
-}
-
-.mode-select {
-  font-weight: 600;
-  border-color: var(--accent);
-  background: var(--panel-3);
-}
-
-.project-select {
-  font-weight: 600;
-  border-color: var(--accent);
 }
 
 .select-missing {

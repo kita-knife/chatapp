@@ -63,35 +63,33 @@ class ProviderNotConfiguredError(ProviderError):
 
 
 # ---------- Provider dispatch ----------
+#
+# Provider is now always passed explicitly by the frontend (see routes.py
+# and the `provider` field in ChatRequest / CreateSessionRequest /
+# connectivity). We no longer derive it from the model-name prefix on the
+# backend — that heuristic was ambiguous (e.g. `qwen3.8-max` matched
+# `ollama` even when the user selected it under the openai provider). The
+# frontend dropdown is now the single source of truth for which provider
+# a model came from.
 
 
-def resolve_provider_for_model(model: str) -> str:
-    """Map a model identifier to a provider key."""
-    lower = model.lower()
-    if lower.startswith("minimax"):
-        return "openlike"
-    if model.startswith("gpt-") or model.startswith("chatgpt-"):
-        return "openai"
-    if (
-        model.startswith("o")
-        and not model.startswith("ollama:")
-        and len(model) > 1
-        and model[1].isdigit()
-    ):
-        # OpenAI o-series (o1, o3, o4, ...); exclude `ollama:`.
-        return "openai"
-    if model.startswith("claude"):
-        return "anthropic"
-    if (
-        model.startswith("ollama:")
-        or model.startswith("llama")
-        or model.startswith("qwen")
-        or model.startswith("mistral")
-    ):
-        return "ollama"
-    if settings.openlike_api_base:
-        return "openlike"
-    return "openai"
+# Role mapping override for OpenAI-compatible endpoints. agno's default
+# `default_role_map` (in agno.models.openai.chat.OpenAIChat) maps
+# `system → developer` because newer OpenAI gpt-4o / o-series support
+# the `developer` role. OpenAI-compatible endpoints such as
+# dashscope (Aliyun), some local proxies, and older OpenAI deployments
+# reject `developer` with:
+#   "developer is not one of ['system', 'assistant', 'user', 'tool', 'function']"
+# We force `system → system` so our chat works uniformly against any
+# OpenAI-compatible endpoint. Anthropic (Claude API) and Ollama don't go
+# through this code path and keep their own role semantics.
+_OPENAI_COMPAT_ROLE_MAP: dict[str, str] = {
+    "system": "system",
+    "user": "user",
+    "assistant": "assistant",
+    "tool": "tool",
+    "model": "assistant",
+}
 
 
 def _build_model(provider: str, model: str) -> Model:
@@ -112,6 +110,7 @@ def _build_model(provider: str, model: str) -> Model:
             base_url=settings.openlike_api_base,
             retries=0,
             retry_with_guidance=False,
+            role_map=_OPENAI_COMPAT_ROLE_MAP,
         )
     if provider == "openai":
         return OpenAIChat(
@@ -120,6 +119,7 @@ def _build_model(provider: str, model: str) -> Model:
             base_url=settings.openai_base_url or "https://api.openai.com/v1",
             retries=0,
             retry_with_guidance=False,
+            role_map=_OPENAI_COMPAT_ROLE_MAP,
         )
     if provider == "anthropic":
         try:
@@ -129,11 +129,30 @@ def _build_model(provider: str, model: str) -> Model:
                 f"anthropic Python package not installed. "
                 f"Run `cd api && uv add anthropic` to enable provider '{provider}'."
             ) from exc
+        # agno's Claude class has no direct `base_url` field, but
+        # `client_params` is forwarded to the Anthropic SDK client
+        # constructor which DOES accept `base_url`. Empty → SDK default
+        # (api.anthropic.com). Set `anthropic.base_url` in config.yml to
+        # point at Anthropic-compatible endpoints (e.g. dashscope).
+        client_params = None
+        if settings.anthropic_base_url:
+            client_params = {"base_url": settings.anthropic_base_url}
         return Claude(
             id=model,
             api_key=settings.anthropic_api_key,
             retries=0,
             retry_with_guidance=False,
+            client_params=client_params,
+        )
+    if provider == "openai_compat":
+        return OpenAILike(
+            id=model,
+            name="OpenAILike",
+            api_key=settings.openai_compat_api_key,
+            base_url=settings.openai_compat_base_url,
+            retries=0,
+            retry_with_guidance=False,
+            role_map=_OPENAI_COMPAT_ROLE_MAP,
         )
     if provider == "ollama":
         try:
@@ -149,6 +168,24 @@ def _build_model(provider: str, model: str) -> Model:
             retries=0,
             retry_with_guidance=False,
         )
+    if provider == "anthropic_compat":
+        try:
+            from agno.models.anthropic import Claude
+        except ImportError as exc:
+            raise ProviderNotConfiguredError(
+                f"anthropic Python package not installed. "
+                f"Run `cd api && uv add anthropic` to enable provider '{provider}'."
+            ) from exc
+        client_params = None
+        if settings.anthropic_compat_base_url:
+            client_params = {"base_url": settings.anthropic_compat_base_url}
+        return Claude(
+            id=model,
+            api_key=settings.anthropic_compat_api_key,
+            retries=0,
+            retry_with_guidance=False,
+            client_params=client_params,
+        )
     raise ProviderError(f"unknown provider: {provider}")
 
 
@@ -162,22 +199,29 @@ _AGENT_BUILDERS = {
 }
 
 
-def _get_agent(model_obj: Model, mode: str, project: str = "") -> Agent:
+def _get_agent(
+    model_obj: Model,
+    mode: str,
+    db,
+    session_id: str = "",
+    user_id: str = "",
+) -> Agent:
     """Build the per-mode `Agent` instance.
 
     Each call constructs a fresh agent (no caching — construction is
     cheap). Tools and instructions are encapsulated in the builder
     functions under `app.modules.chat.agents.*`.
 
-    `project` is forwarded to the builders so they can inject the active
-    project name into the agent's instructions — `project_whole_index_retriever`
-    expects the LLM to pass it explicitly (its cache key includes it).
+    `db` is the shared agno `AsyncPostgresDb` (see `app/core/agno_db.py`),
+    `session_id` maps to our `chat_sessions.id` and `user_id` to
+    `users.id` — this is how agno persists session_state (e.g. `project`)
+    and conversation history per chat session.
     """
     mode = mode or "simple"
     builder = _AGENT_BUILDERS.get(mode)
     if builder is None:
         raise ProviderError(f"unknown mode: {mode}")
-    return builder(model_obj, project=project)
+    return builder(model_obj, db=db, session_id=session_id, user_id=user_id)
 
 
 # ---------- Inline think-tag stripper ----------
@@ -240,41 +284,33 @@ def _trailing_tag_prefix(s: str, tag: str) -> int:
     return 0
 
 
-# ---------- Message conversion ----------
-
-
-def _dict_to_message(d: dict[str, str]) -> Message:
-    """Translate a dict-shaped history entry to an agno `Message`.
-
-    Roles outside the valid set are coerced to `user` — agents tend to
-    treat unknown roles as instructions, which is the wrong default.
-    """
-    role = d.get("role", "user")
-    if role not in {"system", "user", "assistant", "tool"}:
-        role = "user"
-    return Message(role=role, content=d.get("content") or "")
-
-
 # ---------- Streaming via agno Agent ----------
 
 
 async def stream_chat_agent(
     provider: str,
-    messages: list[dict[str, str]],
+    message: str,
     model: str,
     mode: str | None = None,
     project: str = "",
+    session_id: str = "",
+    user_id: str = "",
 ) -> AsyncIterator[ChatChunk]:
     """Stream a chat completion via agno's `Agent` + tool calling.
 
     The agent handles the entire tool-call loop internally; we just
     translate its event stream into our `ChatChunk` SSE format.
 
-    `project` is bound into the agent's session_state and forwarded to
-    every tool via `RunContext` so the SQL `:project` placeholder has
-    a value.
+    `message` is the single user message for this turn. Conversation
+    history is NOT passed by us — the agent loads it from agno's session
+    store (`add_history_to_context=True`), keyed by `session_id`.
+
+    `project` is passed as session_state on every run; agno persists it
+    in the session row (so tools read it via `RunContext.session_state`
+    and the model sees it in the system message via
+    `add_session_state_to_context=True`).
     """
-    if provider not in {"openlike", "openai", "anthropic", "ollama"}:
+    if provider not in {"openlike", "openai", "openai_compat", "anthropic", "anthropic_compat", "ollama"}:
         yield ChatChunk(error=f"unsupported provider: {provider}")
         yield ChatChunk(finish_reason="error")
         return
@@ -287,20 +323,27 @@ async def stream_chat_agent(
 
     model_obj = _build_model(provider, model)
     try:
-        agent = _get_agent(model_obj, mode or "simple", project=project)
+        from app.core.agno_db import get_agno_db
+
+        agent = _get_agent(
+            model_obj,
+            mode or "simple",
+            db=get_agno_db(),
+            session_id=session_id,
+            user_id=user_id,
+        )
     except ProviderError as exc:
         yield ChatChunk(error=str(exc))
         yield ChatChunk(finish_reason="error")
         return
 
-    history = [_dict_to_message(d) for d in messages]
     think_state: dict[str, Any] = {"in_think": False, "pending": ""}
     tokens_in = 0
     tokens_out = 0
 
     try:
         async for event in agent.arun(
-            input=history,
+            input=message,
             stream=True,
             stream_events=True,
             session_state={"project": project},
@@ -387,14 +430,18 @@ async def complete_once(
         raise ProviderNotConfiguredError("OPENLIKE_API_KEY not configured")
     if provider == "openai" and not settings.openai_api_key:
         raise ProviderNotConfiguredError("OPENAI_API_KEY not configured")
+    if provider == "openai_compat" and not settings.openai_compat_api_key:
+        raise ProviderNotConfiguredError("OPENAI_COMPAT_API_KEY not configured")
     if provider == "anthropic" and not settings.anthropic_api_key:
         raise ProviderNotConfiguredError("ANTHROPIC_API_KEY not configured")
+    if provider == "anthropic_compat" and not settings.anthropic_compat_api_key:
+        raise ProviderNotConfiguredError("ANTHROPIC_COMPAT_API_KEY not configured")
 
     m = _build_model(provider, model)
     if hasattr(m, "max_tokens"):
         m.max_tokens = max_tokens
 
-    history = [_dict_to_message({"role": "user", "content": prompt})]
+    history = [Message(role="user", content=prompt)]
     r = await m.ainvoke(history, Message(role="assistant"))
     return r.content or ""
 
@@ -444,14 +491,30 @@ async def check_connectivity(provider: str, model: str) -> dict[str, Any]:
                 else "ANTHROPIC_API_KEY not configured"
             ),
         }
+    if provider == "anthropic_compat":
+        return {
+            "ok": bool(settings.anthropic_compat_api_key),
+            "provider": provider,
+            "model": model,
+            "latency_ms": 0,
+            "error": (
+                None
+                if settings.anthropic_compat_api_key
+                else "ANTHROPIC_COMPAT_API_KEY not configured"
+            ),
+        }
 
-    # OpenAI-compatible (openlike / openai): probe /models with Bearer auth.
+    # OpenAI-compatible (openlike / openai / openai_compat): probe /models
+    # with Bearer auth.
     if provider == "openlike":
         base_url = settings.openlike_api_base
         api_key = settings.openlike_api_key
     elif provider == "openai":
         base_url = settings.openai_base_url or "https://api.openai.com/v1"
         api_key = settings.openai_api_key
+    elif provider == "openai_compat":
+        base_url = settings.openai_compat_base_url or "https://api.openai.com/v1"
+        api_key = settings.openai_compat_api_key
     else:
         return {
             "ok": False,

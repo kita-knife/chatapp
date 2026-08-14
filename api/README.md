@@ -110,15 +110,15 @@ uv run alembic stamp head
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | Health |
-| `GET` | `/api/chat/models` | Models available in the UI |
+| `GET` | `/api/chat/models` | `{provider, model}` pairs expanded from each provider's `models` list |
 | `GET` | `/api/chat/projects` | Distinct project names from `library_coderag.graph_folders` |
-| `GET` | `/api/chat/connectivity` | Pre-flight probe (`?model=...`) |
-| `POST` | `/api/chat/sessions` | Create session |
+| `GET` | `/api/chat/connectivity` | Pre-flight probe (`?provider=...&model=...`, both required) |
+| `POST` | `/api/chat/sessions` | Create session — body `{title?, model, provider}` |
 | `GET` | `/api/chat/sessions` | List sessions |
 | `GET` | `/api/chat/sessions/{id}` | Get one session |
 | `DELETE` | `/api/chat/sessions/{id}` | Delete session |
 | `GET` | `/api/chat/sessions/{id}/messages` | List messages |
-| `POST` | `/api/chat/sessions/{id}/messages` | Send a message — **response is SSE**; body `{content, model?, mode?, project?}` |
+| `POST` | `/api/chat/sessions/{id}/messages` | Send a message — **response is SSE**; body `{content, model, provider, mode?, project?}` |
 
 ### SSE event format
 
@@ -160,16 +160,36 @@ agent's instructions contain a hint telling it to do so.
 
 ## Provider routing
 
-agno is used as the provider layer. The provider is selected by model prefix:
+The provider is **always passed explicitly** by the frontend (dropdown
+selection → `provider` field in `ChatRequest` / `CreateSessionRequest` /
+`connectivity`). There is no model-name-prefix guessing on the backend —
+that heuristic was removed because it misrouted models like
+`qwen3.8-max` (a dashscope model) to the ollama provider.
 
-| Model prefix | Provider |
-|---|---|
-| `minimax*` | `openlike` — OpenAI-compatible (uses `llm.openlike.*` in `config.yml`) |
-| `gpt-*`, `o*`, `chatgpt-*` | OpenAI |
-| `claude*` | Anthropic |
-| `ollama:*`, `llama*`, `qwen*`, `mistral*` | Ollama (local) |
+Six provider slots, each with its own `api_key` / `base_url` / `models`:
 
-If the model doesn't match any prefix, the request falls back to the configured openlike endpoint.
+| Provider key | SDK shape | Endpoint |
+|---|---|---|
+| `openlike` | OpenAI-compatible (`OpenAILike`) | `llm.openlike.api_base` |
+| `openai` | OpenAI (`OpenAIChat`) | `llm.openai.base_url` (empty → api.openai.com) |
+| `openai_compat` | OpenAI-compatible (`OpenAILike`) | `llm.openai_compat.base_url` (hidden from UI when api_key empty) |
+| `anthropic` | Anthropic (`Claude`) | `llm.anthropic.base_url` (empty → api.anthropic.com) |
+| `anthropic_compat` | Anthropic (`Claude`) | `llm.anthropic_compat.base_url` (hidden from UI when api_key empty) |
+| `ollama` | Ollama | `llm.ollama.base_url` |
+
+`GET /api/chat/models` expands every non-hidden provider's `models` list
+into `{provider, model}` pairs; the frontend model dropdown filters by
+the selected provider.
+
+Notes:
+- All OpenAI-shaped providers force `system → system` via `role_map`
+  (agno's default maps `system → developer`, which compatible endpoints
+  like dashscope reject).
+- Anthropic-shaped providers inject `base_url` through `client_params`
+  (agno's `Claude` class has no direct `base_url` field).
+- `app/core/agno_compat.py` patches agno's Claude formatter to drop
+  reasoning content that has no signature (cross-provider history would
+  otherwise crash on `ThinkingBlock(signature=None)`).
 
 ## Agent modes
 
@@ -177,15 +197,16 @@ Three `Agent` factories in `app/modules/chat/agents/`:
 
 | Mode | File | Tools | `max_tokens` | Notes |
 |---|---|---|---|---|
-| `simple` | `simple.py` | none | default | Direct chat, no project hint |
+| `simple` | `simple.py` | none | default | Direct chat, friendly role prompt |
 | `knowledge` | `knowledge.py` | all 6 graph tools | default | RAG-style prompt prefix/suffix from `prompts.yml` |
 | `think` | `think.py` | all 6 graph tools | `4096` | CoT prompt + larger token budget |
 
 The effective mode per request: request body `mode` > `user_preferences.default_mode` > `simple`.
 
-The active project name is injected into the knowledge / think agent's
-instructions so the LLM knows what to pass to tools that take a `project`
-argument.
+The active project name reaches the model via agno's
+`add_session_state_to_context` (system message embeds the session_state,
+which includes `project`), so the LLM knows what to pass to tools that
+take a `project` argument.
 
 ## Config
 
@@ -205,6 +226,11 @@ graph:
   default_project: ""       # fallback if user hasn't picked one in the UI
 ```
 
+The `llm` block has six provider slots (see [Provider routing](#provider-routing));
+`openai_compat` / `anthropic_compat` are extra slots for third-party
+compatible endpoints and are hidden from the UI when their `api_key` is
+empty.
+
 The full annotated template is at [`api/config.example.yml`](config.example.yml).
 
 ## Layout
@@ -215,6 +241,7 @@ api/
 │   ├── main.py                 # FastAPI entrypoint
 │   ├── core/
 │   │   ├── config.py           # YAML settings loader
+│   │   ├── agno_compat.py      # upstream-agno patches (Claude ThinkingBlock signature)
 │   │   └── db.py               # SQLAlchemy async engine
 │   ├── api/
 │   │   └── router.py           # /api router

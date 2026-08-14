@@ -36,3 +36,4 @@ npm-debug.log*
 pg_data/
 
 config.yml
+config copy.yml

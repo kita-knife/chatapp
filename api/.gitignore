@@ -6,4 +6,5 @@ __pycache__
 .env
 .env.local
 config.yml
+config copy.yml
 config.local.yml

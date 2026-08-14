@@ -1,8 +1,26 @@
 import { notifyAuthError } from '@/authEvents';
 
+export type ProviderKey =
+  | 'openlike'
+  | 'openai'
+  | 'openai_compat'
+  | 'anthropic'
+  | 'anthropic_compat'
+  | 'ollama';
+
+export const PROVIDER_LABELS: Record<ProviderKey, string> = {
+  openlike: 'openlike',
+  openai: 'openai',
+  openai_compat: 'openai-compat',
+  anthropic: 'anthropic',
+  anthropic_compat: 'anthropic-compat',
+  ollama: 'ollama',
+};
+
 export interface UserPreferences {
   default_mode: 'simple' | 'knowledge' | 'think';
   default_model: string | null;
+  default_provider: ProviderKey;
   default_project: string | null;
   system_prompt_overrides: {
     think: string | null;
@@ -41,6 +59,7 @@ export interface ChatSession {
   id: string;
   title: string;
   model: string;
+  provider?: string | null;
   owner_id?: string | null;
   created_at: string;
   updated_at: string;
@@ -182,16 +201,16 @@ export const api = {
   // ----- chat -----
   health: () => jsonRequest<{ status: string }>('/api/health'),
   listModels: () => jsonRequest<ModelInfo[]>('/api/chat/models'),
-  connectivity: (model?: string) => {
-    const qs = model ? `?model=${encodeURIComponent(model)}` : '';
+  connectivity: (provider: ProviderKey, model: string) => {
+    const qs = `?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`;
     return jsonRequest<ConnectivityResult>(`/api/chat/connectivity${qs}`);
   },
   listSessions: () => jsonRequest<ChatSession[]>('/api/chat/sessions'),
   listProjects: () => jsonRequest<string[]>('/api/chat/projects'),
-  createSession: (title?: string, model?: string) =>
+  createSession: (title: string | null, model: string, provider: ProviderKey) =>
     jsonRequest<ChatSession>('/api/chat/sessions', {
       method: 'POST',
-      body: JSON.stringify({ title, model }),
+      body: JSON.stringify({ title, model, provider }),
     }),
   getSession: (id: string) => jsonRequest<ChatSession>(`/api/chat/sessions/${id}`),
   deleteSession: (id: string) =>
@@ -200,7 +219,8 @@ export const api = {
   streamMessage: async function* (
     sessionId: string,
     content: string,
-    model?: string,
+    provider: ProviderKey,
+    model: string,
     mode?: string,
     project?: string,
   ): AsyncGenerator<StreamChunk> {
@@ -209,7 +229,7 @@ export const api = {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, model, mode, project }),
+      body: JSON.stringify({ content, model, provider, mode, project }),
     });
     if (!res.ok || !res.body) {
       const err = new ApiError(

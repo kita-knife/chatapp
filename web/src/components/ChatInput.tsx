@@ -1,7 +1,30 @@
-import type { ModelInfo } from '../api/client';
+import type { ModelInfo, ProviderKey } from '../api/client';
 
 export type AgentMode = 'simple' | 'knowledge' | 'think';
 export type UiLanguage = 'zh' | 'en';
+
+// Re-export ProviderKey so consumers (e.g. useChat) can use a single import.
+export type { ProviderKey } from '../api/client';
+
+// The PROVIDER_LABELS dict lives in client.ts but is small enough to be
+// duplicated here for the dropdown. The order is the UI's fixed order
+// and matches the order in client.ts.
+export const PROVIDER_LABELS: Record<ProviderKey, string> = {
+  openlike: 'openlike',
+  openai: 'openai',
+  openai_compat: 'openai-compat',
+  anthropic: 'anthropic',
+  anthropic_compat: 'anthropic-compat',
+  ollama: 'ollama',
+};
+export const PROVIDER_ORDER: ProviderKey[] = [
+  'openlike',
+  'openai',
+  'openai_compat',
+  'anthropic',
+  'anthropic_compat',
+  'ollama',
+];
 
 export const AGENT_MODES: { value: AgentMode; label: string; description: string }[] = [
   { value: 'simple', label: 'Simple', description: 'straightforward chat' },
@@ -20,9 +43,14 @@ interface Props {
   onSend: () => void;
   onStop: () => void;
   streaming: boolean;
+  provider: ProviderKey;
+  setProvider: (v: ProviderKey) => void;
   model: string;
   setModel: (v: string) => void;
-  models: ModelInfo[];
+  modelsForProvider: ModelInfo[];
+  // Set of providers that have at least one model configured (used to
+  // enable/disable provider dropdown entries).
+  availableProviders: ProviderKey[];
   mode: AgentMode;
   setMode: (v: AgentMode) => void;
   language: UiLanguage;
@@ -39,9 +67,12 @@ export function ChatInput({
   onSend,
   onStop,
   streaming,
+  provider,
+  setProvider,
   model,
   setModel,
-  models,
+  modelsForProvider,
+  availableProviders,
   mode,
   setMode,
   language,
@@ -56,7 +87,7 @@ export function ChatInput({
     <div className="chat-input">
       <div className="chat-input-row">
         <select
-          className="select language-select"
+          className="select"
           value={language}
           onChange={(e) => setLanguage(e.target.value as UiLanguage)}
           disabled={streaming}
@@ -69,7 +100,7 @@ export function ChatInput({
           ))}
         </select>
         <select
-          className="select mode-select"
+          className="select"
           value={mode}
           onChange={(e) => setMode(e.target.value as AgentMode)}
           disabled={streaming}
@@ -83,19 +114,32 @@ export function ChatInput({
         </select>
         <select
           className="select"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
+          value={provider}
+          onChange={(e) => setProvider(e.target.value as ProviderKey)}
           disabled={streaming}
-          title="Model"
+          title="LLM provider"
         >
-          {models.map((m) => (
-            <option key={`${m.provider}:${m.model}`} value={m.model}>
-              {m.provider} / {m.model}
+          {PROVIDER_ORDER.map((p) => (
+            <option key={p} value={p} disabled={!availableProviders.includes(p)}>
+              {PROVIDER_LABELS[p]}
             </option>
           ))}
         </select>
         <select
-          className={`select project-select ${projectMissing ? 'select-missing' : ''}`}
+          className="select"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          disabled={streaming || !modelsForProvider.length}
+          title="Model"
+        >
+          {modelsForProvider.map((m) => (
+            <option key={`${m.provider}:${m.model}`} value={m.model}>
+              {m.model}
+            </option>
+          ))}
+        </select>
+        <select
+          className={`select ${projectMissing ? 'select-missing' : ''}`}
           value={project}
           onChange={(e) => setProject(e.target.value)}
           disabled={streaming}

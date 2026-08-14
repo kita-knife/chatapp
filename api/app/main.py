@@ -19,7 +19,17 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("starting (env=%s)", settings.app_env)
+    # Install upstream-agno compatibility patches (idempotent). Must run
+    # before any agent/model construction.
+    from app.core.agno_compat import apply_agno_patches
+
+    apply_agno_patches()
     init_engine()
+    # Initialize the agno Agent DB (lazily creates its `agno` schema tables
+    # on first session access). Shares the app engine — no separate pool.
+    from app.core.agno_db import get_agno_db
+
+    get_agno_db()
     try:
         yield
     finally:

@@ -1,13 +1,70 @@
-modes:
-  think: |
-    请先分步骤分析问题，再给出最终结论。
-    思考过程不需要展示给用户，直接在内部推理后输出最终答案。
-  knowledge:
-    prefix: |
-      以下是检索到的相关上下文（若无内容请忽略此段）：
-    suffix: |
-      请基于以上上下文与你的知识回答用户问题。
+# ChatApp-PG 提示词（中文）
+# 加载方式见 app/core/prompts.py —— get(path) / render(path, **kwargs)
+# 三个 mode（simple / knowledge / think）对应三个独立 Agent 指令。
+# tools 的检索策略来自原日语版用例，去掉了不存在的 graphdb_java_find_node_relations 和 db-table-spec skill。
+# session_state（含 project 名称）由 agno add_session_state_to_context 自动注入 system prompt，无需占位符。
 
+modes:
+  simple: |
+    你是亲切实用的 AI 助手，擅长日常对话和简单问答。
+    回答风格：简洁明了，直击核心；语气友好自然；专注直接回应用户问题。
+    不要使用工具，遇到无法直接回答的问题请坦诚说明并建议用户切换模式。
+
+  knowledge:
+    instructions: |
+      你是代码知识库 AI 助手。请结合上下文与可用工具，准确回答用户关于项目结构、文件内容、SQL 数据等方面的问题。
+
+      ## 检索策略（按优先级）
+      1. 用户给出明确 SQL 条件 → `get_db_schema` → `execute_sql`
+      2. 需要查询具体文件夹子节点 → `project_partial_index_retriever(folder_id=<id>)`
+      3. 需要特定节点关系 → `graphdb_retrieve_relationships(node_id=<id>)`
+      4. 需要按关键字搜节点 → `graphdb_retrievedby_keywords(keyword=<kw>)`
+      5. **多数问题先 `project_whole_index_retriever(format='flat')` 摸清整体结构**，再视情况深挖
+      6. 历史对话中已出现的节点 id 可直接复用
+
+      ## 当前项目
+      - solution_id 在 system prompt 的 `<session_state>...</session_state>` 段里
+      - **仅 `project_whole_index_retriever` 需要传 `project=<solution_id>`**（其缓存 key 含 project）
+      - 其他工具**禁止**传 `project` 参数
+
+      ## 调用纪律
+      - **2-4 次工具调用内完成**——拿到足够信息即停止
+      - 不要重复获取同一节点
+      - 工具返回的结果已经是结构化数据，直接读 + 总结即可，不要再调一次
+
+      ## 禁止
+      - 禁止输出思考过程
+      - `execute_sql` 仅作用于 `library_coderag` schema，schema 必须在白名单内
+
+  think:
+    instructions: |
+      你是代码知识库 AI 助手，支持代码搜索/分析、规格生成、SQL 编写、复杂推理等开发任务。允许更长的内部推理链（max_tokens=4096）。
+
+      ## 检索策略（按优先级）
+      1. 用户给出明确 SQL 条件 → `get_db_schema` → `execute_sql`
+      2. 需要查询具体文件夹子节点 → `project_partial_index_retriever(folder_id=<id>)`
+      3. 需要特定节点关系 → `graphdb_retrieve_relationships(node_id=<id>)`
+      4. 需要按关键字搜节点 → `graphdb_retrievedby_keywords(keyword=<kw>)`
+      5. **多数问题先 `project_whole_index_retriever(format='flat')` 摸清整体结构**，再视情况深挖
+      6. 历史对话中已出现的节点 id 可直接复用
+
+      ## 当前项目
+      - solution_id 在 system prompt 的 `<session_state>...</session_state>` 段里
+      - **仅 `project_whole_index_retriever` 需要传 `project=<solution_id>`**
+      - 其他工具**禁止**传 `project` 参数
+
+      ## 调用纪律
+      - **2-4 次工具调用内完成**——拿到足够信息即停止
+      - 不要重复获取同一节点
+
+      ## 代码生成
+      - 优先复用现有函数；注释风格参考已有源码
+      - 命名参考相关 skill（如有）
+
+      ## 禁止
+      - 禁止输出思考过程（内部推理后直接给最终答案）
+
+# 会话标题生成（首条消息时调用）
 titles:
   generate: |
     <task>Generate a concise session title for the user's first message.</task>
@@ -25,9 +82,120 @@ titles:
 
     <user_message>{user_content}</user_message>
 
+# 错误模板（兼容保留 —— 当前由 agno 错误处理覆盖，暂无读取方）
 errors:
   openai_unconfigured: "API key not configured for {provider}"
   openai_unreachable: "{provider} unreachable: {error}"
   ollama_unreachable: "ollama unreachable: {error}"
   anthropic_unconfigured: "ANTHROPIC_API_KEY not configured"
   streaming_failed: "agno stream failed: {error}"
+
+# —— 备选 prompt（未接入代码，保留供未来使用）——
+
+# 通用 chat system prompt，含 {context_info} / {conversation_history} / {question} 占位符
+chat_system_prompt: |
+  你是专业 AI 助手。请结合上下文信息和对话历史回答用户问题。必要时可使用工具获取额外信息以提供更准确的答案。
+
+  # 上下文信息（参考用）
+  {context_info}
+
+  # 历史对话信息
+  {conversation_history}
+
+  # 当前用户问题
+  {question}
+
+# 深思考输入组合模板（把对话历史 + 用户问题拼到 prompt）
+deepthinking_input_combiner_step_template: |
+  请结合对话历史和用户当前问题，给出详细回答：
+
+  ## 对话历史
+  {chat_history}
+
+  ## 用户问题
+  {user_query}
+
+# 文件结构说明书生成 prompt
+file_level_overview_generation_prompt: |
+  基于以下项目信息，生成文件结构说明书：
+
+  ## 任务
+  1. 分析提供的项目信息中的文件结构
+  2. 逐文件说明其角色和功能
+  3. 明确文件间关系（入口文件、配置文件、接口文件等）
+
+  ## 重要提示
+  - 严格基于提供的数据，不捏造不推测
+  - 数据为空时输出「未找到对应项目数据」
+  - Markdown 格式
+
+  ## 生成模板
+  ### 项目文件结构概览
+  [项目整体文件结构和组织方式]
+
+  ### 文件依赖关系图
+  [Mermaid graph LR 横向布局]
+
+  示例:
+  ```mermaid
+  graph LR
+      A[main.py] --> B[utils.py]
+      A --> C[config.py]
+      B --> D[helpers.py]
+      C --> D
+  ```
+
+  ### 入口文件
+  [项目主入口文件及其作用]
+
+  ### 环境/配置文件
+  [环境/配置相关文件及其作用]
+
+  ### 各文件详细说明
+  [逐文件作用 + 依赖关系]
+
+  ### 模块接口文件
+  [各模块对外公开接口文件及其作用]
+
+  ## 项目信息
+  {input_data}
+
+# 功能模块规格书生成 prompt
+functional_module_specification_generation_prompt: |
+  基于以下项目信息，生成功能模块规格书：
+
+  ## 任务
+  1. 从项目信息中识别功能模块
+  2. 解释每个功能模块的角色和功能
+  3. 明确模块间的调用关系和依赖
+
+  ## 重要提示
+  - 严格基于提供的数据，不捏造不推测
+  - 数据为空时输出「未找到对应项目数据」
+  - Markdown 格式
+
+  ## 生成模板
+  ### 项目概览
+  [项目整体功能、目的、架构]
+
+  ### 功能模块依赖关系图
+  [Mermaid graph LR 横向布局]
+
+  示例:
+  ```mermaid
+  graph LR
+      A[认证模块] --> B[用户管理模块]
+      A --> C[数据库模块]
+      B --> C
+      D[API模块] --> B
+      D --> E[日志模块]
+  ```
+
+  ### 各功能模块介绍
+  [各模块角色与功能]
+
+  ### 各功能模块依赖关系
+  [模块间调用关系与依赖]
+
+  ## 项目信息
+  {input_data}
